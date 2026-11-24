@@ -81,6 +81,18 @@ def update_points(user_id: int, delta: int):
     conn.commit()
     conn.close()
 
+# --- MEDIA DURATION HELPER ---
+def get_media_duration(file_path: str) -> float:
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", file_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return float(res.stdout.strip())
+    except Exception:
+        return 0.0
+
 # --- FREE BURMESE MALE VOICES (3 STYLES) ---
 FREE_VOICES = {
     "maung_thiha": {"voice": "my-MM-ThihaNeural", "pitch": "+0Hz", "rate": "+0%"},
@@ -137,17 +149,28 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- AUTO TRANSLATE ---
-def auto_transcribe_and_translate(audio_path: str) -> str:
+# --- FAST AUTO TRANSLATE WITH DURATION MATCHING ---
+def auto_transcribe_and_translate_fast(audio_path: str, duration_sec: float) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။")
-    uploaded = genai.upload_file(audio_path)
+
+    with open(audio_path, "rb") as f:
+        audio_bytes = f.read()
+
+    # Target ~15 to 18 Burmese characters per second so TTS duration matches video duration
+    target_chars = max(40, int(duration_sec * 16)) if duration_sec > 0 else 250
+
     model = genai.GenerativeModel("gemini-2.5-flash")
     prompt = (
-        "Listen to this video audio and write a natural, engaging Burmese spoken-style movie recap narration script "
-        "that summarizes and translates what is happening. Output ONLY the Burmese text without any English or explanations."
+        f"Listen to this audio (duration: {duration_sec:.1f} seconds). "
+        f"Translate and narrate what is happening into natural spoken Burmese movie-recap style. "
+        f"CRITICAL: Keep the Burmese script length around {target_chars} characters so when read aloud it finishes in about {duration_sec:.1f} seconds. "
+        f"Output ONLY the Burmese narration text without any English, timestamps, or explanations."
     )
-    response = model.generate_content([uploaded, prompt])
+    response = model.generate_content([
+        {"mime_type": "audio/mp3", "data": audio_bytes},
+        prompt
+    ])
     return response.text.strip()
 
 # --- TELEGRAM BOT ---
@@ -301,7 +324,7 @@ HTML_UI = """<!DOCTYPE html>
         <div>
           <h3 class="font-bold text-base text-white flex items-center gap-1.5">🎬 Video ➔ မြန်မာအသံ</h3>
           <p class="text-xs text-gray-400 mt-1 leading-relaxed">
-            English · 中文 · 한국어 · ไทย စတဲ့ ဘာသာစကားမျိုးစုံ video ကို တင်လိုက်ရုံနဲ့ AI က နားထောင်ပြီး မြန်မာလို ဘာသာပြန်၊ အချိန်ကွက်တိ အသံထုတ်ပေးပါတယ်။
+            English · 中文 · 한국어 · ไทย စတဲ့ ဘာသာစကားမျိုးစုံ video ကို တင်လိုက်ရုံနဲ့ AI က နားထောင်ပြီး မြန်မာလို ဘာသာပြန်၊ မူရင်း Video ကြာချိန်အတိုင်း အချိန်ကွက်တိ အသံထုတ်ပေးပါတယ်။
           </p>
         </div>
 
@@ -323,26 +346,27 @@ HTML_UI = """<!DOCTYPE html>
         </div>
 
         <div class="bg-[#232136] border border-purple-500/20 rounded-xl p-2.5 text-xs text-purple-200">
-          🖼️ မူရင်း video ထဲက စာသား/logo ကို ဖုံးချင်ရင် ပုံပေါ်မှာ box ဆွဲပါ (မလိုရင် "ဖုံးမထားဘူး")
+          🖼️ မူရင်း video ထဲက စာသား/logo ကို ဖုံးချင်ရင် ပုံပေါ်မှာ box ဆွဲပါ (သို့မဟုတ် Video ဘယ်/ညာ လှန်ပါ)
         </div>
 
+        <!-- UPDATED 3 BUTTONS: ဖုံးမထားဘူး | Blur | ဘယ်/ညာလှန် -->
         <div class="grid grid-cols-3 gap-2">
           <button onclick="setMaskMode('none')" id="mask-none" class="py-2.5 rounded-xl bg-[#1e2030] border border-gray-700 text-xs font-bold text-gray-300">ဖုံးမထားဘူး</button>
           <button onclick="setMaskMode('blur')" id="mask-blur" class="py-2.5 rounded-xl grad-pill text-xs font-extrabold">🌫️ Blur</button>
-          <button onclick="setMaskMode('cover')" id="mask-cover" class="py-2.5 rounded-xl bg-[#1e2030] border border-gray-700 text-xs font-bold text-gray-300">⬛ Cover</button>
+          <button onclick="toggleFlipVideo()" id="btn-flip" class="py-2.5 rounded-xl bg-[#1e2030] border border-gray-700 text-xs font-bold text-gray-300">🔄 ဘယ်/ညာလှန်</button>
         </div>
 
         <!-- INTERACTIVE VIDEO PREVIEW -->
         <div id="previewContainer" class="relative w-full rounded-2xl overflow-hidden bg-black border border-gray-800 min-h-[230px] flex items-center justify-center">
-          <video id="videoPreview" class="w-full max-h-[360px] object-contain hidden" playsinline controls></video>
+          <video id="videoPreview" class="w-full max-h-[360px] object-contain hidden transition-transform duration-200" playsinline controls></video>
           <div id="emptyVideoPlaceholder" class="text-center p-6 space-y-1">
             <p class="text-2xl">🎞️</p>
-            <p class="text-xs text-gray-400">အပေါ်မှ Video ရွေးလိုက်ပါက ဤနေရာတွင် Video ပေါ်လာပြီး Blur/Cover အကွက်ကို လက်ဖြင့် စိတ်ကြိုက် ဆွဲရွှေ့နိုင်ပါမည်</p>
+            <p class="text-xs text-gray-400">အပေါ်မှ Video ရွေးလိုက်ပါက ဤနေရာတွင် Video ပေါ်လာပြီး Blur အကွက်ကို လက်ဖြင့် ဆွဲရွှေ့နိုင်သလို ဘယ်/ညာ လှန်နိုင်ပါမည်</p>
           </div>
 
           <div id="maskBox" style="top: 62%; left: 10%; width: 80%; height: 14%;"
                class="absolute border-2 border-teal-400 bg-white/15 backdrop-blur-md cursor-move flex items-center justify-center touch-none">
-            <span class="text-[10px] font-bold text-white bg-black/50 px-1.5 py-0.5 rounded pointer-events-none">Blur/Cover Box</span>
+            <span class="text-[10px] font-bold text-white bg-black/50 px-1.5 py-0.5 rounded pointer-events-none">Blur Box</span>
             <div id="resizeHandle" class="absolute -bottom-2.5 -right-2.5 w-6 h-6 rounded-full bg-teal-400 border-2 border-gray-900 shadow-lg cursor-nwse-resize"></div>
           </div>
 
@@ -469,13 +493,15 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- Edit Burmese Subtitle / Narration Script -->
-        <div class="space-y-2 pt-1">
-          <div class="flex justify-between items-center">
-            <span class="text-xs font-bold text-amber-300">✏️ မြန်မာစာတန်းတွေကို ကြိုက်သလို ပြင်ပါ</span>
-            <button onclick="autoTranslateVideo()" id="autoTransBtn" class="text-[11px] bg-indigo-600 px-2.5 py-1 rounded-lg font-bold text-white">✨ AI Auto ဘာသာပြန်</button>
+        <!-- UPDATED: FULL-WIDTH AI BUTTON ON TOP + LABEL BELOW -->
+        <div class="space-y-2 pt-2">
+          <button onclick="autoTranslateVideo()" id="autoTransBtn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 font-extrabold text-sm text-white shadow-lg flex items-center justify-center gap-2 active:scale-98">
+            ✨ AI Auto ဘာသာပြန် (အမြန်စာသားထုတ်မည်)
+          </button>
+          <div class="text-xs font-bold text-amber-300 pt-1">
+            ✏️ မြန်မာစာတန်းတွေကို ကြိုက်သလို ပြင်ပါ
           </div>
-          <textarea id="recapScript" rows="4" placeholder="Video တင်ပြီး AI Auto ဘာသာပြန် နှိပ်ပါ (သို့မဟုတ်) မြန်မာစာသား ကိုယ်တိုင် ရိုက်ထည့်ပါ..." class="w-full bg-[#10121b] border border-gray-800 rounded-xl p-3 text-sm text-white focus:border-teal-400 outline-none"></textarea>
+          <textarea id="recapScript" rows="4" placeholder="Video တင်ပြီး အပေါ်က AI Auto ဘာသာပြန် ခလုတ်ကို နှိပ်ပါ (သို့မဟုတ်) မြန်မာစာသား ကိုယ်တိုင် ရိုက်ထည့်ပါ..." class="w-full bg-[#10121b] border border-gray-800 rounded-xl p-3 text-sm text-white focus:border-teal-400 outline-none"></textarea>
         </div>
       </div>
     </div>
@@ -633,7 +659,7 @@ HTML_UI = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- VOICE CLONE MODAL (NOW SUPPORTS BOTH MP3/WAV AND MP4 VIDEO!) -->
+  <!-- VOICE CLONE MODAL (MP3/WAV + MP4 VIDEO) -->
   <div id="cloneModal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
     <div class="card-dark w-full max-w-sm p-5 rounded-2xl space-y-3">
       <h3 class="font-bold text-sm text-purple-300">🎙️ အသံတူပွား ဖန်တီးရန် (Voice Cloning)</h3>
@@ -677,6 +703,7 @@ HTML_UI = """<!DOCTYPE html>
       voice: "maung_thiha",
       speed: 1.0,
       maskMode: "blur",
+      flipH: false,
       ratio: "original",
       res: "original",
       subEnabled: true,
@@ -745,27 +772,37 @@ HTML_UI = """<!DOCTYPE html>
         }
         fill.style.width = pct + "%";
         pctText.innerText = pct + "%";
-      }, 80);
+      }, 60);
     }
 
     function setMaskMode(mode) {
       state.maskMode = mode;
       const box = document.getElementById("maskBox");
-      ["none", "blur", "cover"].forEach(m => {
+      ["none", "blur"].forEach(m => {
         document.getElementById("mask-" + m).className = "py-2.5 rounded-xl bg-[#1e2030] border border-gray-700 text-xs font-bold text-gray-300";
       });
       document.getElementById("mask-" + mode).className = "py-2.5 rounded-xl grad-pill text-xs font-extrabold";
 
       if (mode === "none") {
         box.classList.add("hidden");
-      } else if (mode === "blur") {
+      } else {
         box.classList.remove("hidden");
         box.style.backgroundColor = "rgba(255,255,255,0.15)";
         box.style.backdropFilter = "blur(10px)";
+      }
+    }
+
+    // Flip Video Left/Right (Horizontal Mirror)
+    function toggleFlipVideo() {
+      state.flipH = !state.flipH;
+      const btn = document.getElementById("btn-flip");
+      const vid = document.getElementById("videoPreview");
+      if (state.flipH) {
+        btn.className = "py-2.5 rounded-xl grad-pill text-xs font-extrabold";
+        vid.style.transform = "scaleX(-1)";
       } else {
-        box.classList.remove("hidden");
-        box.style.backgroundColor = "rgba(0,0,0,0.92)";
-        box.style.backdropFilter = "none";
+        btn.className = "py-2.5 rounded-xl bg-[#1e2030] border border-gray-700 text-xs font-bold text-gray-300";
+        vid.style.transform = "scaleX(1)";
       }
     }
 
@@ -885,23 +922,30 @@ HTML_UI = """<!DOCTYPE html>
       activateGroup("spd-btn", el);
     }
 
+    // FAST AUTO AI TRANSLATE
     async function autoTranslateVideo() {
       const file = document.getElementById("videoInput").files[0];
       if (!file) return alert("Video ဖိုင် အရင်ရွေးပါ။");
       const btn = document.getElementById("autoTransBtn");
-      btn.innerText = "⏳ AI နားထောင်နေသည်...";
+      btn.innerText = "⚡ စာသား အမြန်ထုတ်နေပါသည်...";
       btn.disabled = true;
 
       const fd = new FormData();
       fd.append("video", file);
-      const res = await fetch("/api/auto-script", { method: "POST", body: fd });
-      const data = await res.json();
-      btn.innerText = "✨ AI Auto ဘာသာပြန်";
-      btn.disabled = false;
-      if (!res.ok) return alert(data.detail || "Error");
-      document.getElementById("recapScript").value = data.script;
+      try {
+        const res = await fetch("/api/auto-script", { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Error");
+        document.getElementById("recapScript").value = data.script;
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        btn.innerText = "✨ AI Auto ဘာသာပြန် (အမြန်စာသားထုတ်မည်)";
+        btn.disabled = false;
+      }
     }
 
+    // START RECAP RENDER (DURATION SYNCED)
     async function startRecapRender() {
       const file = document.getElementById("videoInput").files[0];
       const script = document.getElementById("recapScript").value.trim();
@@ -925,7 +969,7 @@ HTML_UI = """<!DOCTYPE html>
           if (pct > 92) pct = 92;
           fill.style.width = pct + "%";
           pctLabel.innerText = pct + "%";
-          statusMsg.innerText = `⏳ Video ကို Render လုပ်နေပါသည် (${pct}%)...`;
+          statusMsg.innerText = `⏳ Video ကြာချိန်နှင့် အသံကို အတိအကျ ညှိ၍ Render လုပ်နေပါသည် (${pct}%)...`;
         }
       }, 600);
 
@@ -942,6 +986,7 @@ HTML_UI = """<!DOCTYPE html>
       fd.append("voice_type", state.voice);
       fd.append("speed", state.speed);
       fd.append("mask_mode", state.maskMode);
+      fd.append("flip_h", state.flipH ? "1" : "0");
       fd.append("box_x", boxX);
       fd.append("box_y", boxY);
       fd.append("box_w", boxW);
@@ -957,7 +1002,7 @@ HTML_UI = """<!DOCTYPE html>
 
         fill.style.width = "100%";
         pctLabel.innerText = "100%";
-        statusMsg.innerText = "🎉 Render လုပ်ငန်းစဉ် 100% ပြီးစီးပါပြီ!";
+        statusMsg.innerText = "🎉 Render 100% ပြီးစီးပါပြီ! (မူရင်း Video ကြာချိန်အတိုင်း ထွက်လာပါပြီ)";
         state.lastVideoUrl = data.video_url;
         document.getElementById("hdDownloadLink").href = data.video_url;
         doneActions.classList.remove("hidden");
@@ -1018,7 +1063,7 @@ HTML_UI = """<!DOCTYPE html>
       btn.innerText = "Clone လုပ်မည်";
       btn.disabled = false;
       if (!res.ok) return alert(data.detail);
-      alert("✅ အသံတူပွား ဖန်တီးပြီးပါပြီ! (⭐ အသံတူပွား ကတ်ကို ရွေးပြီး သုံးနိုင်ပါပြီ)");
+      alert("✅ အသံတူပွား ဖန်တီးပြီးပါပြီ!");
       document.getElementById("cloneModal").classList.add("hidden");
     }
 
@@ -1093,7 +1138,6 @@ async def api_clone_voice(user_id: int = Form(...), voice_name: str = Form(...),
     with open(raw_path, "wb") as f:
         f.write(await sample.read())
 
-    # Convert both Audio (MP3/WAV) and Video (MP4/MOV) into clean MP3 for Voice Cloning
     subprocess.run(
         ["ffmpeg", "-y", "-i", raw_path, "-vn", "-acodec", "libmp3lame", "-q:a", "2", audio_path],
         check=True
@@ -1109,8 +1153,14 @@ async def api_auto_script(video: UploadFile = File(...)):
     in_aud = f"uploads/tmp_{job_id}.mp3"
     with open(in_vid, "wb") as f:
         f.write(await video.read())
-    subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", in_aud], check=True)
-    script = auto_transcribe_and_translate(in_aud)
+
+    vid_dur = get_media_duration(in_vid)
+    # Extract ultra-lightweight 32kbps mono audio for instant upload & fast AI processing
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", in_vid, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", in_aud],
+        check=True
+    )
+    script = auto_transcribe_and_translate_fast(in_aud, vid_dur)
     return {"script": script}
 
 @app.post("/api/render-recap")
@@ -1120,6 +1170,7 @@ async def api_render_recap(
     voice_type: str = Form("maung_thiha"),
     speed: float = Form(1.0),
     mask_mode: str = Form("blur"),
+    flip_h: str = Form("0"),
     box_x: int = Form(10),
     box_y: int = Form(62),
     box_w: int = Form(80),
@@ -1130,26 +1181,43 @@ async def api_render_recap(
     user = get_or_create_user(user_id)
     job_id = str(uuid.uuid4())[:8]
     in_vid = f"uploads/in_{job_id}_{video.filename}"
-    tts_audio = f"outputs/recap_audio_{job_id}.mp3"
+    raw_tts = f"outputs/raw_audio_{job_id}.mp3"
+    synced_tts = f"outputs/recap_audio_{job_id}.mp3"
     out_vid = f"outputs/MovieMyanmarAi_{job_id}.mp4"
 
     with open(in_vid, "wb") as f:
         f.write(await video.read())
 
+    vid_dur = get_media_duration(in_vid)
+
     if voice_type == "cloned" and user["cloned_voice_id"] and user["points"] >= 10:
-        generate_cloned_tts(script_text, user["cloned_voice_id"], tts_audio)
+        generate_cloned_tts(script_text, user["cloned_voice_id"], raw_tts)
         update_points(user_id, -10)
     else:
-        await generate_free_burmese_tts(script_text, voice_type if voice_type != "cloned" else "maung_thiha", speed, tts_audio)
+        await generate_free_burmese_tts(script_text, voice_type if voice_type != "cloned" else "maung_thiha", speed, raw_tts)
+
+    # Auto-sync Burmese TTS duration to match original Video duration
+    tts_dur = get_media_duration(raw_tts)
+    if vid_dur > 0 and tts_dur > 0:
+        ratio = tts_dur / vid_dur
+        # Clamp tempo between 0.75x and 1.45x so voice sounds natural while fitting video length
+        tempo = max(0.75, min(1.45, ratio))
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", raw_tts, "-filter:a", f"atempo={tempo:.3f}", synced_tts],
+            check=True
+        )
+    else:
+        synced_tts = raw_tts
 
     filters = []
+    if flip_h == "1":
+        filters.append("hflip")
+
     if mask_mode == "blur" and box_w > 0 and box_h > 0:
         filters.append(
             f"split[main][b];[b]crop=iw*{box_w/100}:ih*{box_h/100}:iw*{box_x/100}:ih*{box_y/100},boxblur=15:5[blurred];"
             f"[main][blurred]overlay=W*{box_x/100}:H*{box_y/100}"
         )
-    elif mask_mode == "cover" and box_w > 0 and box_h > 0:
-        filters.append(f"drawbox=x=iw*{box_x/100}:y=ih*{box_y/100}:w=iw*{box_w/100}:h=ih*{box_h/100}:color=black:t=fill")
 
     if aspect_ratio == "9:16":
         filters.append("scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2")
@@ -1158,10 +1226,11 @@ async def api_render_recap(
 
     vf_str = ",".join(filters) if filters else "null"
 
+    # -shortest ensures output video duration matches the original video duration
     cmd = [
-        "ffmpeg", "-y", "-i", in_vid, "-i", tts_audio,
-        "-filter_complex", f"[0:v]{vf_str}[v];[0:a]volume=0.15[bg];[1:a]volume=1.3[fg];[bg][fg]amix=inputs=2:duration=longest[a]",
-        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", out_vid
+        "ffmpeg", "-y", "-i", in_vid, "-i", synced_tts,
+        "-filter_complex", f"[0:v]{vf_str}[v];[0:a]volume=0.12[bg];[1:a]volume=1.35[fg];[bg][fg]amix=inputs=2:duration=first[a]",
+        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", out_vid
     ]
     subprocess.run(cmd, check=True)
 
