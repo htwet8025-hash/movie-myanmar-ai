@@ -17,7 +17,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1638781080").strip())
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://example.com").strip()
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://movie-myanmar-ai-2.onrender.com").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 
@@ -248,11 +248,382 @@ async def start_telegram_bot():
 async def on_startup():
     asyncio.create_task(start_telegram_bot())
 
+# --- EMBEDDED MINI APP HTML ---
+HTML_UI = """<!DOCTYPE html>
+<html lang="my">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Movie Myanmar Ai</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #0b0e14; color: #f1f5f9; font-family: sans-serif; }
+    .card { background-color: #151a23; border: 1px solid #242c3a; }
+    .tab-active { color: #06b6d4; border-top: 2px solid #06b6d4; }
+  </style>
+</head>
+<body class="pb-20">
+
+  <div class="sticky top-0 z-20 bg-[#0b0e14]/95 backdrop-blur border-b border-gray-800 px-4 py-3 flex justify-between items-center">
+    <div class="flex items-center gap-2">
+      <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center font-bold text-white">M</div>
+      <div>
+        <h1 class="font-bold text-base text-cyan-400 leading-tight">Movie Myanmar Ai</h1>
+        <p class="text-[11px] text-gray-400">AI Voice & Video Recap Studio</p>
+      </div>
+    </div>
+    <div class="bg-cyan-950/60 border border-cyan-500/30 px-3 py-1 rounded-full text-xs font-semibold text-cyan-300">
+      💎 <span id="userPoints">100</span> pts
+    </div>
+  </div>
+
+  <!-- TAB 1: STUDIO -->
+  <div id="tab-studio" class="p-4 space-y-4">
+    <div class="grid grid-cols-2 gap-2 bg-[#151a23] p-1 rounded-xl border border-gray-800">
+      <button onclick="switchStudioMode('tts')" id="btn-mode-tts" class="py-2 rounded-lg text-xs font-bold bg-cyan-600 text-white">🎙️ စာ ➔ အသံ (TTS)</button>
+      <button onclick="switchStudioMode('video')" id="btn-mode-video" class="py-2 rounded-lg text-xs font-bold text-gray-400">🎬 Video ➔ မြန်မာအသံ</button>
+    </div>
+
+    <div class="card p-4 rounded-2xl space-y-3">
+      <div class="flex justify-between items-center">
+        <label class="text-xs font-bold text-gray-300">အသံရွေးချယ်ပါ (Voice Selection)</label>
+        <button onclick="document.getElementById('cloneModal').classList.remove('hidden')" class="text-[11px] bg-purple-600/20 text-purple-300 border border-purple-500/40 px-2.5 py-1 rounded-lg">
+          + အသံတူပွား (Clone)
+        </button>
+      </div>
+      <select id="voiceSelect" class="w-full bg-[#0b0e14] border border-gray-700 rounded-xl p-2.5 text-sm text-white">
+        <option value="maung_thiha">🆓 မောင်သီဟ - ပုံပြင်ပြောသူ (Free / Recap)</option>
+        <option value="ko_zaw">🆓 ကိုဇော် - သွက်လက်တင်ဆက်သူ (Free / Fast)</option>
+        <option value="u_min">🆓 ဦးမင်း - အသံဩဇာလေးနက် (Free / Deep)</option>
+        <option value="cloned">⭐ ကျွန်ုပ်၏ အသံတူပွား (My Cloned Voice - Uses Points)</option>
+      </select>
+      <p class="text-[11px] text-emerald-400">💡 Point ကုန်သွားပါက Free မြန်မာယောက်ျားလေးအသံ (၃) မျိုးကို အကန့်အသတ်မရှိ ဆက်သုံးနိုင်ပါသည်။</p>
+    </div>
+
+    <!-- MODE A: TEXT TO SPEECH -->
+    <div id="mode-tts" class="card p-4 rounded-2xl space-y-3">
+      <label class="text-xs font-bold text-gray-300">မြန်မာစာသား ရိုက်ထည့်ပါ</label>
+      <textarea id="ttsText" rows="5" placeholder="ဒီနေ့ ပြောပြပေးမယ့် ဇာတ်ကားလေးကတော့..." class="w-full bg-[#0b0e14] border border-gray-700 rounded-xl p-3 text-sm text-white focus:border-cyan-500 outline-none"></textarea>
+      
+      <div class="flex items-center justify-between text-xs text-gray-400">
+        <span>အသံအမြန်နှုန်း: <b id="speedVal" class="text-cyan-400">1.0x</b></span>
+        <input type="range" id="speedSlider" min="0.8" max="1.4" step="0.1" value="1.0" oninput="document.getElementById('speedVal').innerText=this.value+'x'" class="w-36 accent-cyan-500">
+      </div>
+
+      <button onclick="generateTTS()" id="ttsBtn" class="w-full py-3 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 font-bold text-sm text-white shadow-lg">
+        🔊 အသံဖိုင် ထုတ်မည်
+      </button>
+
+      <div id="ttsResult" class="hidden pt-2">
+        <audio id="audioPlayer" controls class="w-full"></audio>
+      </div>
+    </div>
+
+    <!-- MODE B: VIDEO RECAP MAKER -->
+    <div id="mode-video" class="hidden card p-4 rounded-2xl space-y-3">
+      <label class="text-xs font-bold text-gray-300">၁။ နိုင်ငံခြား Video ဖိုင် ရွေးပါ (MP4)</label>
+      <input type="file" id="videoFile" accept="video/*" class="w-full text-xs text-gray-300 bg-[#0b0e14] border border-gray-700 rounded-xl p-2" />
+
+      <button onclick="autoGenerateScript()" id="autoScriptBtn" class="w-full py-2 rounded-xl bg-indigo-600/30 border border-indigo-500/50 text-indigo-300 font-bold text-xs">
+        ✨ AI ဖြင့် Video ထဲကအသံကို မြန်မာစာသား အလိုအလျောက် ပြောင်းမည်
+      </button>
+
+      <label class="text-xs font-bold text-gray-300">၂။ နောက်ခံပြောမည့် မြန်မာစာသား (ပြန်ပြင်နိုင်သည်)</label>
+      <textarea id="recapScript" rows="4" placeholder="ဇာတ်လမ်းအစမှာ မင်းသားက..." class="w-full bg-[#0b0e14] border border-gray-700 rounded-xl p-3 text-sm text-white"></textarea>
+
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="text-[11px] text-gray-400">မူရင်းစာတန်း Blur ဖုံးမည့်နေရာ (%)</label>
+          <input type="number" id="blurPos" value="80" min="0" max="90" class="w-full bg-[#0b0e14] border border-gray-700 rounded-lg p-2 text-xs text-white mt-1" />
+        </div>
+        <div>
+          <label class="text-[11px] text-gray-400">Video အချိုး (Aspect Ratio)</label>
+          <select id="aspectRatio" class="w-full bg-[#0b0e14] border border-gray-700 rounded-lg p-2 text-xs text-white mt-1">
+            <option value="original">မူရင်းအတိုင်း (Original)</option>
+            <option value="9:16">TikTok / Shorts (9:16)</option>
+          </select>
+        </div>
+      </div>
+
+      <button onclick="renderVideoRecap()" id="renderBtn" class="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-600 font-bold text-sm text-white shadow-lg">
+        🎬 Video Render လုပ်ပြီး Bot ထဲပို့မည်
+      </button>
+    </div>
+  </div>
+
+  <!-- TAB 2: PLANS & PAYMENT -->
+  <div id="tab-plans" class="hidden p-4 space-y-4">
+    <div class="card p-4 rounded-2xl border-cyan-500/40 space-y-2">
+      <h2 class="font-bold text-sm text-cyan-400">💳 ငွေလွှဲလက်ခံမည့် အကောင့်များ</h2>
+      <p class="text-xs text-gray-300">အမည်: <b class="text-white">Kaung San Phyo</b></p>
+      <div class="flex items-center justify-between bg-[#0b0e14] p-2.5 rounded-xl border border-gray-800">
+        <div>
+          <p class="text-xs text-gray-400">KBZPay / WavePay / UABPay</p>
+          <p class="font-mono font-bold text-base text-amber-400">09409700002</p>
+        </div>
+        <button onclick="copyPhone()" class="bg-cyan-600 text-white text-xs px-3 py-1.5 rounded-lg font-bold">Copy</button>
+      </div>
+    </div>
+
+    <div class="space-y-2.5">
+      <div onclick="selectPlan('Starter Plan', '15,000 MMK', 1500)" class="card p-4 rounded-2xl flex justify-between items-center cursor-pointer hover:border-cyan-500">
+        <div>
+          <h3 class="font-bold text-sm text-white">Starter Plan</h3>
+          <p class="text-xs text-gray-400">1,500 Points (Voice Clone & Pro TTS)</p>
+        </div>
+        <span class="bg-cyan-500/20 text-cyan-300 font-bold text-xs px-3 py-1.5 rounded-xl">15,000 MMK</span>
+      </div>
+
+      <div onclick="selectPlan('Pro Plan', '40,000 MMK', 5000)" class="card p-4 rounded-2xl flex justify-between items-center cursor-pointer border-amber-500/40 hover:border-amber-400">
+        <div>
+          <h3 class="font-bold text-sm text-amber-400">Pro Plan 🔥</h3>
+          <p class="text-xs text-gray-400">5,000 Points + Priority Render</p>
+        </div>
+        <span class="bg-amber-500/20 text-amber-300 font-bold text-xs px-3 py-1.5 rounded-xl">40,000 MMK</span>
+      </div>
+
+      <div onclick="selectPlan('Business Plan', '88,000 MMK', 12500)" class="card p-4 rounded-2xl flex justify-between items-center cursor-pointer hover:border-cyan-500">
+        <div>
+          <h3 class="font-bold text-sm text-purple-400">Business Plan</h3>
+          <p class="text-xs text-gray-400">12,500 Points (အများဆုံးသက်သာ)</p>
+        </div>
+        <span class="bg-purple-500/20 text-purple-300 font-bold text-xs px-3 py-1.5 rounded-xl">88,000 MMK</span>
+      </div>
+    </div>
+
+    <div id="paymentBox" class="hidden card p-4 rounded-2xl space-y-3 border-emerald-500/50">
+      <h3 class="text-xs font-bold text-emerald-400">ရွေးချယ်ထားသော Plan: <span id="selectedPlanLabel"></span></h3>
+      <label class="block text-xs text-gray-300">ငွေလွှဲပြေစာ (Screenshot) တင်ပေးပါ:</label>
+      <input type="file" id="receiptFile" accept="image/*" class="w-full text-xs bg-[#0b0e14] p-2 rounded-xl border border-gray-700" />
+      <button onclick="submitPayment()" class="w-full py-2.5 rounded-xl bg-emerald-600 font-bold text-xs text-white">✅ ငွေလွှဲပြေစာ ပေးပို့မည်</button>
+    </div>
+  </div>
+
+  <!-- TAB 3: EARN FREE POINTS -->
+  <div id="tab-earn" class="hidden p-4 space-y-4">
+    <div class="card p-5 rounded-2xl text-center space-y-3">
+      <div class="text-3xl">🎁</div>
+      <h2 class="font-bold text-base text-white">အခမဲ့ Point စုဆောင်းပါ</h2>
+      <p class="text-xs text-gray-400">ကြော်ငြာကြည့်ရှုပြီး Point များ အခမဲ့ ရယူနိုင်သလို Free မြန်မာအသံ (၃) မျိုးကိုလည်း အချိန်မရွေး အခမဲ့ သုံးနိုင်ပါသည်။</p>
+      <button onclick="earnFreePoints()" class="w-full py-3 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 font-bold text-sm text-white">
+        📺 ကြော်ငြာကြည့်ပြီး +5 Points ယူမည်
+      </button>
+    </div>
+  </div>
+
+  <!-- TAB 4: PROFILE -->
+  <div id="tab-profile" class="hidden p-4 space-y-4">
+    <div class="card p-4 rounded-2xl space-y-2">
+      <h2 class="font-bold text-sm text-cyan-400">👤 အကောင့်အချက်အလက်</h2>
+      <p class="text-xs text-gray-300">Telegram ID: <span id="profId" class="font-mono text-white"></span></p>
+      <p class="text-xs text-gray-300">လက်ကျန် Point: <span id="profPts" class="font-bold text-amber-400"></span></p>
+      <p class="text-xs text-gray-300">Tool အမည်: <span class="text-white font-semibold">Movie Myanmar Ai</span></p>
+    </div>
+  </div>
+
+  <!-- VOICE CLONE MODAL -->
+  <div id="cloneModal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+    <div class="card w-full max-w-sm p-5 rounded-2xl space-y-3">
+      <h3 class="font-bold text-sm text-purple-400">🎙️ အသံတူပွား ဖန်တီးရန် (Voice Cloning)</h3>
+      <p class="text-xs text-gray-400">ဆူညံသံမပါသော ၅ စက္ကန့်မှ ၁၅ စက္ကန့်အတွင်း အသံဖိုင် (MP3/WAV) တင်ပေးပါ။</p>
+      <input type="text" id="cloneName" placeholder="အသံအမည် (ဥပမာ- My Voice)" class="w-full bg-[#0b0e14] border border-gray-700 rounded-xl p-2.5 text-xs text-white" />
+      <input type="file" id="cloneSample" accept="audio/*" class="w-full text-xs bg-[#0b0e14] border border-gray-700 rounded-xl p-2" />
+      <div class="flex gap-2 pt-2">
+        <button onclick="document.getElementById('cloneModal').classList.add('hidden')" class="flex-1 py-2 rounded-xl bg-gray-800 text-xs">ပိတ်မည်</button>
+        <button onclick="uploadVoiceClone()" id="cloneBtn" class="flex-1 py-2 rounded-xl bg-purple-600 font-bold text-xs text-white">Clone လုပ်မည်</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM NAVIGATION -->
+  <div class="fixed bottom-0 inset-x-0 bg-[#151a23] border-t border-gray-800 grid grid-cols-4 text-center py-2 text-[11px] font-semibold">
+    <button onclick="showTab('studio')" id="nav-studio" class="tab-active py-1">🎬 Studio</button>
+    <button onclick="showTab('plans')" id="nav-plans" class="text-gray-400 py-1">💎 Plans</button>
+    <button onclick="showTab('earn')" id="nav-earn" class="text-gray-400 py-1">🎁 Earn</button>
+    <button onclick="showTab('profile')" id="nav-profile" class="text-gray-400 py-1">👤 Profile</button>
+  </div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.expand();
+    const userId = tg.initDataUnsafe?.user?.id || 1638781080;
+    document.getElementById("profId").innerText = userId;
+
+    let selectedPlan = {};
+
+    async function loadUser() {
+      const res = await fetch(`/api/user/${userId}`);
+      const data = await res.json();
+      document.getElementById("userPoints").innerText = data.points;
+      document.getElementById("profPts").innerText = data.points + " pts";
+    }
+    loadUser();
+
+    function showTab(name) {
+      ["studio", "plans", "earn", "profile"].forEach(t => {
+        document.getElementById(`tab-${t}`).classList.add("hidden");
+        document.getElementById(`nav-${t}`).classList.remove("tab-active");
+        document.getElementById(`nav-${t}`).classList.add("text-gray-400");
+      });
+      document.getElementById(`tab-${name}`).classList.remove("hidden");
+      document.getElementById(`nav-${name}`).classList.add("tab-active");
+      document.getElementById(`nav-${name}`).classList.remove("text-gray-400");
+    }
+
+    function switchStudioMode(mode) {
+      if (mode === "tts") {
+        document.getElementById("mode-tts").classList.remove("hidden");
+        document.getElementById("mode-video").classList.add("hidden");
+        document.getElementById("btn-mode-tts").className = "py-2 rounded-lg text-xs font-bold bg-cyan-600 text-white";
+        document.getElementById("btn-mode-video").className = "py-2 rounded-lg text-xs font-bold text-gray-400";
+      } else {
+        document.getElementById("mode-tts").classList.add("hidden");
+        document.getElementById("mode-video").classList.remove("hidden");
+        document.getElementById("btn-mode-video").className = "py-2 rounded-lg text-xs font-bold bg-cyan-600 text-white";
+        document.getElementById("btn-mode-tts").className = "py-2 rounded-lg text-xs font-bold text-gray-400";
+      }
+    }
+
+    async function generateTTS() {
+      const text = document.getElementById("ttsText").value.trim();
+      if (!text) return alert("စာသားအရင် ရိုက်ထည့်ပါ။");
+      const btn = document.getElementById("ttsBtn");
+      btn.innerText = "⏳ အသံထုတ်နေပါသည်...";
+      btn.disabled = true;
+
+      const fd = new FormData();
+      fd.append("user_id", userId);
+      fd.append("text", text);
+      fd.append("voice_type", document.getElementById("voiceSelect").value);
+      fd.append("speed", document.getElementById("speedSlider").value);
+
+      const res = await fetch("/api/tts", { method: "POST", body: fd });
+      const data = await res.json();
+      btn.innerText = "🔊 အသံဖိုင် ထုတ်မည်";
+      btn.disabled = false;
+
+      if (!res.ok) return alert(data.detail || "Error");
+      document.getElementById("ttsResult").classList.remove("hidden");
+      document.getElementById("audioPlayer").src = data.audio_url;
+      document.getElementById("audioPlayer").play();
+      loadUser();
+    }
+
+    async function uploadVoiceClone() {
+      const name = document.getElementById("cloneName").value.trim();
+      const file = document.getElementById("cloneSample").files[0];
+      if (!name || !file) return alert("အမည်နှင့် အသံဖိုင် ထည့်ပါ။");
+
+      const btn = document.getElementById("cloneBtn");
+      btn.innerText = "⏳ လုပ်ဆောင်နေသည်...";
+      const fd = new FormData();
+      fd.append("user_id", userId);
+      fd.append("voice_name", name);
+      fd.append("sample", file);
+
+      const res = await fetch("/api/clone-voice", { method: "POST", body: fd });
+      const data = await res.json();
+      btn.innerText = "Clone လုပ်မည်";
+      if (!res.ok) return alert(data.detail);
+      alert("✅ အသံတူပွား ဖန်တီးပြီးပါပြီ!");
+      document.getElementById("cloneModal").classList.add("hidden");
+      document.getElementById("voiceSelect").value = "cloned";
+    }
+
+    async function autoGenerateScript() {
+      const file = document.getElementById("videoFile").files[0];
+      if (!file) return alert("Video ဖိုင် အရင်ရွေးပါ။");
+      const btn = document.getElementById("autoScriptBtn");
+      btn.innerText = "⏳ AI ဖြင့် နားထောင်ပြီး မြန်မာလို ဘာသာပြန်နေပါသည်...";
+      btn.disabled = true;
+
+      const fd = new FormData();
+      fd.append("video", file);
+      const res = await fetch("/api/auto-script", { method: "POST", body: fd });
+      const data = await res.json();
+      btn.innerText = "✨ AI ဖြင့် Video ထဲကအသံကို မြန်မာစာသား အလိုအလျောက် ပြောင်းမည်";
+      btn.disabled = false;
+
+      if (!res.ok) return alert(data.detail || "Error");
+      document.getElementById("recapScript").value = data.script;
+    }
+
+    async function renderVideoRecap() {
+      const file = document.getElementById("videoFile").files[0];
+      const script = document.getElementById("recapScript").value.trim();
+      if (!file || !script) return alert("Video ဖိုင်နှင့် မြန်မာစာသား ထည့်ပါ။");
+
+      const btn = document.getElementById("renderBtn");
+      btn.innerText = "⏳ Render လုပ်နေပါသည် (ခဏစောင့်ပါ)...";
+      btn.disabled = true;
+
+      const fd = new FormData();
+      fd.append("user_id", userId);
+      fd.append("script_text", script);
+      fd.append("voice_type", document.getElementById("voiceSelect").value);
+      fd.append("blur_y_percent", document.getElementById("blurPos").value);
+      fd.append("aspect_ratio", document.getElementById("aspectRatio").value);
+      fd.append("video", file);
+
+      const res = await fetch("/api/render-recap", { method: "POST", body: fd });
+      btn.innerText = "🎬 Video Render လုပ်ပြီး Bot ထဲပို့မည်";
+      btn.disabled = false;
+
+      if (res.ok) {
+        alert("✅ Video Render ပြီးပါပြီ! သင့် Telegram Bot Chat ထဲသို့ ပို့ပေးလိုက်ပါပြီ။");
+        loadUser();
+      } else {
+        alert("Render မအောင်မြင်ပါ။");
+      }
+    }
+
+    function copyPhone() {
+      navigator.clipboard.writeText("09409700002");
+      alert("ဖုန်းနံပါတ် 09409700002 (Kaung San Phyo) ကို Copy ကူးပြီးပါပြီ။");
+    }
+
+    function selectPlan(name, amount, pts) {
+      selectedPlan = { name, amount, pts };
+      document.getElementById("selectedPlanLabel").innerText = `${name} (${amount} - ${pts} pts)`;
+      document.getElementById("paymentBox").classList.remove("hidden");
+    }
+
+    async function submitPayment() {
+      const file = document.getElementById("receiptFile").files[0];
+      if (!file) return alert("ငွေလွှဲပြေစာ ပုံရွေးပါ။");
+
+      const fd = new FormData();
+      fd.append("user_id", userId);
+      fd.append("plan_name", selectedPlan.name);
+      fd.append("amount", selectedPlan.amount);
+      fd.append("points", selectedPlan.pts);
+      fd.append("receipt", file);
+
+      const res = await fetch("/api/submit-payment", { method: "POST", body: fd });
+      if (res.ok) {
+        alert("✅ ငွေလွှဲပြေစာ ပေးပို့ပြီးပါပြီ! Admin စစ်ဆေးပြီးပါက Point ထည့်ပေးပါမည်။");
+        document.getElementById("paymentBox").classList.add("hidden");
+      }
+    }
+
+    async function earnFreePoints() {
+      const fd = new FormData();
+      fd.append("user_id", userId);
+      const res = await fetch("/api/earn-ad", { method: "POST", body: fd });
+      if (res.ok) {
+        alert("🎉 +5 Points ရရှိပါပြီ!");
+        loadUser();
+      }
+    }
+  </script>
+</body>
+</html>"""
+
 # --- API ROUTES ---
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
-    with open("index.html", "r", encoding="utf-8") as f:
-        return f.read()
+    return HTMLResponse(content=HTML_UI)
 
 @app.get("/api/user/{user_id}")
 async def api_user(user_id: int):
