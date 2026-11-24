@@ -15,11 +15,11 @@ import google.generativeai as genai
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "1638781080"))
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://example.com")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMIN_ID = int(os.getenv("ADMIN_ID", "1638781080").strip())
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://example.com").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -155,7 +155,7 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- AUTO TRANSLATE VIDEO AUDIO TO BURMESE SCRIPT (Gemini) ---
+# --- AUTO TRANSLATE VIDEO AUDIO TO BURMESE SCRIPT ---
 def auto_transcribe_and_translate(audio_path: str) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။")
@@ -169,7 +169,7 @@ def auto_transcribe_and_translate(audio_path: str) -> str:
     return response.text.strip()
 
 # --- TELEGRAM BOT ---
-tg_app = Application.builder().token(BOT_TOKEN).build()
+tg_app = Application.builder().token(BOT_TOKEN).build() if BOT_TOKEN else None
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -229,15 +229,24 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     conn.close()
 
-tg_app.add_handler(CommandHandler("start", start_cmd))
-tg_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(approve|reject)_"))
+if tg_app:
+    tg_app.add_handler(CommandHandler("start", start_cmd))
+    tg_app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(approve|reject)_"))
+
+async def start_telegram_bot():
+    if not tg_app:
+        return
+    try:
+        await tg_app.initialize()
+        await tg_app.start()
+        await tg_app.updater.start_polling(drop_pending_updates=True)
+        print("Telegram Bot started successfully!")
+    except Exception as e:
+        print(f"Telegram Bot startup warning: {e}")
 
 @app.on_event("startup")
 async def on_startup():
-    if BOT_TOKEN:
-        await tg_app.initialize()
-        await tg_app.start()
-        asyncio.create_task(tg_app.updater.start_polling())
+    asyncio.create_task(start_telegram_bot())
 
 # --- API ROUTES ---
 @app.get("/", response_class=HTMLResponse)
@@ -331,13 +340,14 @@ async def api_render_recap(
     ]
     subprocess.run(cmd, check=True)
 
-    with open(out_vid, "rb") as vf:
-        await tg_app.bot.send_video(
-            chat_id=user_id,
-            video=vf,
-            caption="🎬 **Movie Myanmar Ai** မှ Video Render လုပ်ပြီးပါပြီ!",
-            parse_mode="Markdown"
-        )
+    if tg_app:
+        with open(out_vid, "rb") as vf:
+            await tg_app.bot.send_video(
+                chat_id=user_id,
+                video=vf,
+                caption="🎬 **Movie Myanmar Ai** မှ Video Render လုပ်ပြီးပါပြီ!",
+                parse_mode="Markdown"
+            )
 
     return {"video_url": f"/{out_vid}"}
 
@@ -361,21 +371,22 @@ async def api_submit_payment(
     with open(img_path, "wb") as f:
         f.write(await receipt.read())
 
-    kb = [[
-        InlineKeyboardButton("✅ Approve", callback_data=f"approve_{payment_id}"),
-        InlineKeyboardButton("❌ Reject", callback_data=f"reject_{payment_id}")
-    ]]
-    with open(img_path, "rb") as photo:
-        await tg_app.bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=photo,
-            caption=f"💰 **ငွေလွှဲပြေစာ အသစ် (#{payment_id})**\n"
-                    f"👤 User ID: `{user_id}`\n"
-                    f"📦 Plan: **{plan_name}** ({amount})\n"
-                    f"💎 Points: **+{points} pts**",
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode="Markdown"
-        )
+    if tg_app:
+        kb = [[
+            InlineKeyboardButton("✅ Approve", callback_data=f"approve_{payment_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{payment_id}")
+        ]]
+        with open(img_path, "rb") as photo:
+            await tg_app.bot.send_photo(
+                chat_id=ADMIN_ID,
+                photo=photo,
+                caption=f"💰 **ငွေလွှဲပြေစာ အသစ် (#{payment_id})**\n"
+                        f"👤 User ID: `{user_id}`\n"
+                        f"📦 Plan: **{plan_name}** ({amount})\n"
+                        f"💎 Points: **+{points} pts**",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode="Markdown"
+            )
 
     return {"status": "submitted", "order_id": payment_id}
 
