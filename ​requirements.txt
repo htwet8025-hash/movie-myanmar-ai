@@ -1,9 +1,8 @@
 fastapi
 uvicorn
-python-telegram-bot==20.7
-edge-tts
-python-dotenv
 python-multipart
-aiofiles
+python-telegram-bot
+edge-tts
 requests
-google-generativeai
+python-dotenv
+Pillow
