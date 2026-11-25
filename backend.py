@@ -1,5 +1,6 @@
 import os
 import re
+import math
 import uuid
 import wave
 import base64
@@ -53,6 +54,7 @@ def init_db():
             plan_name TEXT,
             amount TEXT,
             points INTEGER,
+            pay_method TEXT DEFAULT 'KBZPay',
             status TEXT DEFAULT 'pending'
         )
     """)
@@ -79,6 +81,13 @@ def update_points(user_id: int, delta: int):
     c.execute("UPDATE users SET points = MAX(0, points + ?) WHERE user_id = ?", (delta, user_id))
     conn.commit()
     conn.close()
+
+def calc_text_credits(text: str) -> int:
+    # 20 characters = 1 Credit (1 character = 0.05 Credit), minimum 1 Credit if text is non-empty
+    clean_len = len(text.strip())
+    if clean_len == 0:
+        return 0
+    return max(1, math.ceil(clean_len / 20))
 
 # --- MEDIA HELPERS ---
 def get_media_duration(file_path: str) -> float:
@@ -315,9 +324,9 @@ async def build_synced_dub_and_srt(
     final_audio_out: str,
     srt_out: str
 ):
-    # Parse lines matching: [00:02 - 00:06] [M] စာသား
     pattern = re.compile(r"\[(\d{1,2}:\d{2}(?:\.\d+)?)\s*-\s*(\d{1,2}:\d{2}(?:\.\d+)?)\]\s*(?:\[(M|F)\])?\s*(.+)")
     segments = []
+    pure_texts = []
     for line in script_text.splitlines():
         m = pattern.search(line.strip())
         if m:
@@ -327,17 +336,27 @@ async def build_synced_dub_and_srt(
             txt = m.group(4).strip()
             if txt and end_s > start_s:
                 segments.append((start_s, end_s, gender, txt))
+                pure_texts.append(txt)
 
-    # Fallback if user typed plain text without timestamps
+    # Calculate Credit cost: 20 characters = 1 Credit
+    total_spoken_text = "".join(pure_texts) if pure_texts else script_text.strip()
+    credit_cost = calc_text_credits(total_spoken_text)
+
     if not segments:
         clean_txt = script_text.strip()
         raw_tts = f"outputs/raw_{job_id}.mp3"
-        if voice_type == "cloned" and user["cloned_voice_id"] and user["points"] >= 10:
+        if voice_type == "cloned":
+            if user["points"] < credit_cost:
+                raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
+            if not user["cloned_voice_id"]:
+                raise HTTPException(status_code=400, detail="အသံတူပွား (Voice Clone) အရင်ဖန်တီးပါ။")
             generate_cloned_tts(clean_txt, user["cloned_voice_id"], raw_tts)
-            update_points(user_id, -10)
-        elif voice_type in GOOGLE_VOICES and user["points"] >= 5:
+            update_points(user_id, -credit_cost)
+        elif voice_type in GOOGLE_VOICES:
+            if user["points"] < credit_cost:
+                raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
             generate_google_gemini_tts(clean_txt, GOOGLE_VOICES[voice_type]["name"], speaking_style, raw_tts)
-            update_points(user_id, -5)
+            update_points(user_id, -credit_cost)
         else:
             v_key = voice_type if voice_type in EDGE_VOICES else "edge_thiha"
             await generate_edge_tts(clean_txt, v_key, speaking_style, speed, raw_tts)
@@ -353,31 +372,30 @@ async def build_synced_dub_and_srt(
             sf.write(f"1\n00:00:00,500 --> {format_srt_time(max(2.0, vid_dur - 0.5))}\n{clean_txt}\n\n")
         return
 
-    # Generate individual voice clips placed at exact start timestamps (silent during non-speaking scenes!)
+    # Check Credit balance before rendering paid voices
+    if voice_type in ["cloned"] or voice_type in GOOGLE_VOICES:
+        if user["points"] < credit_cost:
+            raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
+
     clip_files = []
     srt_lines = []
-    google_cost_paid = 0
 
     for idx, (start_s, end_s, gender, txt) in enumerate(segments):
         seg_dur = max(0.8, end_s - start_s)
         raw_clip = f"outputs/seg_raw_{job_id}_{idx}.mp3"
         fit_clip = f"outputs/seg_fit_{job_id}_{idx}.mp3"
 
-        # Choose voice (Auto Duo switches Male/Female per speaker!)
         if voice_type == "auto_duo":
             chosen_voice = "edge_nilar" if gender == "F" else "edge_thiha"
             await generate_edge_tts(txt, chosen_voice, speaking_style, speed, raw_clip)
-        elif voice_type == "cloned" and user["cloned_voice_id"] and user["points"] >= 2:
+        elif voice_type == "cloned" and user["cloned_voice_id"]:
             generate_cloned_tts(txt, user["cloned_voice_id"], raw_clip)
-            update_points(user_id, -2)
-        elif voice_type in GOOGLE_VOICES and user["points"] >= 1:
+        elif voice_type in GOOGLE_VOICES:
             generate_google_gemini_tts(txt, GOOGLE_VOICES[voice_type]["name"], speaking_style, raw_clip)
-            google_cost_paid += 1
         else:
             chosen_voice = voice_type if voice_type in EDGE_VOICES else ("edge_nilar" if gender == "F" else "edge_thiha")
             await generate_edge_tts(txt, chosen_voice, speaking_style, speed, raw_clip)
 
-        # Fit clip speed only if it overflows the character's speaking window
         clip_dur = get_media_duration(raw_clip)
         if clip_dur > seg_dur * 1.05:
             tempo = min(1.45, clip_dur / seg_dur)
@@ -388,13 +406,12 @@ async def build_synced_dub_and_srt(
         clip_files.append((start_s, fit_clip))
         srt_lines.append(f"{idx + 1}\n{format_srt_time(start_s)} --> {format_srt_time(end_s)}\n{txt}\n")
 
-    if google_cost_paid > 0:
-        update_points(user_id, -min(10, google_cost_paid))
+    if voice_type in ["cloned"] or voice_type in GOOGLE_VOICES:
+        update_points(user_id, -credit_cost)
 
     with open(srt_out, "w", encoding="utf-8") as sf:
         sf.write("\n".join(srt_lines))
 
-    # Mix all timed clips onto a silent base track of exact video duration
     total_dur = max(vid_dur, segments[-1][1] + 0.5)
     cmd = ["ffmpeg", "-y", "-f", "lavfi", "-t", f"{total_dur:.3f}", "-i", "anullsrc=r=24000:cl=mono"]
     filter_parts = []
@@ -447,10 +464,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         c.execute("UPDATE payments SET status = 'approved' WHERE id = ?", (payment_id,))
         c.execute("UPDATE users SET points = points + ? WHERE user_id = ?", (pts, target_user_id))
         conn.commit()
-        await query.edit_message_caption(caption=f"✅ Approved! Order #{payment_id} (+{pts} pts) ထည့်ပေးပြီးပါပြီ။")
+        await query.edit_message_caption(caption=f"✅ Approved! Order #{payment_id} (+{pts:,} Credits) ထည့်ပေးပြီးပါပြီ။")
         await context.bot.send_message(
             chat_id=target_user_id,
-            text=f"🎉 **ငွေပေးချေမှု အတည်ပြုပြီးပါပြီ!**\nOrder: `#{payment_id}` ({plan_name})\n**+{pts} Points** ထည့်သွင်းပေးလိုက်ပါပြီ။",
+            text=f"🎉 **ငွေဖြည့်သွင်းမှု အတည်ပြုပြီးပါပြီ!**\nOrder: `#{payment_id}` ({plan_name})\n**+{pts:,} Credits** ထည့်သွင်းပေးလိုက်ပါပြီ။",
             parse_mode="Markdown"
         )
     else:
@@ -523,10 +540,10 @@ HTML_UI = """<!DOCTYPE html>
         <p class="text-xs text-gray-400" id="userGreeting">Hi, K S P</p>
       </div>
     </div>
-    <div class="bg-[#1b1d29] border border-gray-800 px-3.5 py-1.5 rounded-full flex items-center gap-1.5 text-xs font-bold">
-      <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
-      <span id="userPoints" class="text-amber-300">100</span> <span class="text-gray-300">points</span>
-    </div>
+    <button onclick="showTab('plans')" class="bg-[#1b1d29] border border-emerald-500/40 px-3 py-1.5 rounded-full flex items-center gap-1.5 text-xs font-extrabold">
+      <span id="userPoints" class="text-emerald-400">100</span> <span class="text-gray-200">Credit</span>
+      <span class="w-4 h-4 rounded-full bg-emerald-500 text-gray-950 flex items-center justify-center font-black text-xs">+</span>
+    </button>
   </div>
 
   <!-- HERO BANNER -->
@@ -536,7 +553,7 @@ HTML_UI = """<!DOCTYPE html>
         ကိုယ်ပိုင်အသံနဲ့ <span class="grad-text">စကားပြောစေမယ်</span>
       </h2>
       <p class="text-xs text-gray-400 leading-relaxed">
-        ဇာတ်ကောင်စကားပြောတဲ့အချိန်မှ ကွက်တိပြောပြီး တိတ်နေတဲ့အချိန် ရပ်နားပေးမယ်
+        စာသားအလုံး ၂၀ လျှင် 1 Credit (၁ လုံး = 0.05 Credit) · Free အသံများ အခမဲ့
       </p>
       <div class="flex items-center justify-between h-8 pt-2 px-1 opacity-90" id="waveformBox"></div>
     </div>
@@ -628,7 +645,7 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- SUBTITLE DESIGN SETTINGS (RESTORED ALL OPTIONS!) -->
+        <!-- SUBTITLE DESIGN SETTINGS -->
         <div class="space-y-2 pt-1">
           <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">
             🔤 စာတန်း အရွယ်အစား <span id="subSizeLabel" class="text-teal-400">ပုံမှန်</span>
@@ -706,9 +723,9 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- Color Presets (8 STYLES) -->
+        <!-- Color Presets -->
         <div class="space-y-2">
-          <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">🎨 စာတန်း အရောင်စတိုင် — ပြောနေတဲ့ စကားလုံးက အရောင်ပြောင်းသွားမယ်</div>
+          <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">🎨 စာတန်း အရောင်စတိုင်</div>
           <div class="grid grid-cols-2 gap-2 text-center text-xs">
             <button onclick="setColorPreset('clean', 'text-amber-400', this)" class="preset-btn p-2.5 rounded-xl bg-[#1e2030] border-2 border-purple-500">
               <div class="font-bold">ဒီနေ့ <span class="text-amber-400">စာတန်း</span> ပေါ်မယ်</div>
@@ -772,18 +789,54 @@ HTML_UI = """<!DOCTYPE html>
           </button>
 
           <div class="text-xs font-bold text-amber-300 pt-1">
-            ✏️ မြန်မာစာတန်းတွေကို ကြိုက်သလို ပြင်ပါ (အချိန်ကွက်တိ စာကြောင်းများ)
+            ✏️ မြန်မာစာတန်းတွေကို ကြိုက်သလို ပြင်ပါ
           </div>
-          <textarea id="recapScript" rows="5" placeholder="[00:02 - 00:05] [M] မင်း ဘာလုပ်နေတာလဲ။&#10;[00:07 - 00:10] [F] ကျွန်မ ရှင့်ကို စောင့်နေတာပါ။" class="w-full bg-[#10121b] border border-gray-800 rounded-xl p-3 text-xs text-white focus:border-teal-400 outline-none leading-relaxed"></textarea>
+          <textarea id="recapScript" oninput="updateRecapCreditCalc()" rows="5" placeholder="[00:02 - 00:05] [M] မင်း ဘာလုပ်နေတာလဲ။&#10;[00:07 - 00:10] [F] ကျွန်မ ရှင့်ကို စောင့်နေတာပါ။" class="w-full bg-[#10121b] border border-gray-800 rounded-xl p-3 text-xs text-white focus:border-teal-400 outline-none leading-relaxed"></textarea>
+
+          <!-- LIVE CREDIT CALCULATION BOX FOR VIDEO SCRIPT -->
+          <div class="bg-[#10121b] border border-gray-800 rounded-xl p-2.5 flex justify-between items-center text-[11px]">
+            <div>
+              <span class="text-gray-400">စာလုံးရေ: <b id="recapCharCount" class="text-white">0</b> လုံး</span>
+              <span class="text-gray-500 block text-[10px]">နှုန်းထား: ၁ လုံး = 0.05 Credit (အလုံး ၂၀ = 1 Credit)</span>
+            </div>
+            <div class="text-right">
+              <span class="text-gray-400 block text-[10px]">ကျသင့်မည့် Credit</span>
+              <span id="recapCreditCost" class="font-extrabold text-emerald-400 text-xs">0 Credit</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- TEXT -> VOICE SECTION -->
+    <!-- TEXT -> VOICE SECTION (WITH DETAILED CREDIT CALCULATOR: 20 CHARS = 1 CREDIT) -->
     <div id="section-tts" class="hidden card-dark rounded-2xl p-4 space-y-3">
-      <h3 class="font-bold text-sm text-white">✍️ စာသားမှ မြန်မာအသံ ထုတ်မည်</h3>
-      <textarea id="ttsOnlyText" rows="5" placeholder="အသံထုတ်လိုသော မြန်မာစာသား ရိုက်ထည့်ပါ..." class="w-full bg-[#10121b] border border-gray-800 rounded-xl p-3 text-sm text-white outline-none"></textarea>
-      <button onclick="runTtsOnly()" id="ttsOnlyBtn" class="w-full py-3 rounded-xl grad-btn text-sm shadow-lg">🔊 အသံဖိုင် ထုတ်မည်</button>
+      <div class="flex justify-between items-center">
+        <h3 class="font-bold text-sm text-white">✍️ စာသားမှ မြန်မာအသံ ထုတ်မည်</h3>
+        <span class="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full font-bold">
+          အလုံး 20 = 1 Credit
+        </span>
+      </div>
+
+      <textarea id="ttsOnlyText" oninput="updateTtsCreditCalc()" rows="6" placeholder="အသံထုတ်လိုသော မြန်မာစာသား ရိုက်ထည့်ပါ..." class="w-full bg-[#10121b] border border-gray-800 rounded-xl p-3 text-sm text-white focus:border-teal-400 outline-none"></textarea>
+
+      <!-- DETAILED LIVE CREDIT BREAKDOWN CARD -->
+      <div class="bg-[#10121b] border border-indigo-500/30 rounded-xl p-3 space-y-1.5 text-xs">
+        <div class="flex justify-between">
+          <span class="text-gray-400">📝 ရိုက်ထည့်ထားသော စာလုံးရေ:</span>
+          <span class="font-bold text-white"><span id="ttsCharCount">0</span> လုံး</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-400">💎 ၁ လုံး ကျသင့်နှုန်း:</span>
+          <span class="font-semibold text-cyan-300">0.05 Credit (စာသားအလုံး 20 = 1 Credit)</span>
+        </div>
+        <div class="flex justify-between border-t border-gray-800 pt-1.5">
+          <span class="text-gray-300 font-bold">💰 စုစုပေါင်း ကျသင့်မည့် Credit:</span>
+          <span class="font-extrabold text-amber-400 text-sm"><span id="ttsCreditCost">0</span> Credit</span>
+        </div>
+        <p class="text-[10px] text-gray-400 pt-0.5">* Free Edge အသံ (Nilar / Thiha) ကို ရွေးထားပါက Credit မနုတ်ဘဲ အခမဲ့ ထုတ်ပေးပါမည်။ Premium / Voice Clone အတွက် 20 လုံးလျှင် 1 Credit နုတ်ယူပါမည်။</p>
+      </div>
+
+      <button onclick="runTtsOnly()" id="ttsOnlyBtn" class="w-full py-3.5 rounded-xl grad-btn text-sm shadow-lg">🔊 အသံဖိုင် ထုတ်မည်</button>
       <audio id="ttsOnlyAudio" controls class="w-full hidden"></audio>
     </div>
 
@@ -798,30 +851,29 @@ HTML_UI = """<!DOCTYPE html>
 
       <audio id="samplePreviewPlayer" class="hidden"></audio>
 
-      <!-- Auto Dialogue Mode (Recommended for conversations) -->
-      <div class="text-[11px] font-bold text-emerald-400">✨ အပြန်အလှန် စကားပြောစနစ် (Recommended)</div>
+      <div class="text-[11px] font-bold text-emerald-400">✨ အပြန်အလှန် စကားပြောစနစ် (Free)</div>
       <div onclick="selectVoice('auto_duo', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border-2 border-amber-400 flex items-center justify-between cursor-pointer">
         <div>
           <span class="font-bold text-amber-300 text-xs">🎭 Auto ကျား/မ အပြန်အလှန်ပြော (Thiha + Nilar)</span>
-          <p class="text-[10px] text-gray-300 mt-0.5">ယောက်ျားလေးပြောရင် သီဟ၊ မိန်းကလေးပြောရင် နီလာ အသံအလိုအလျောက် ပြောင်းပြောပေးမည် (Free)</p>
+          <p class="text-[10px] text-gray-300 mt-0.5">ယောက်ျားလေးပြောရင် သီဟ၊ မိန်းကလေးပြောရင် နီလာ အသံအလိုအလျောက် ပြောင်းပြောပေးမည် (0 Credit)</p>
         </div>
         <button type="button" onclick="playVoiceSample(event, 'edge_thiha', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold shrink-0">▶</button>
       </div>
 
-      <div class="text-[11px] font-bold text-gray-400 pt-1">Edge အသံ — အခမဲ့</div>
+      <div class="text-[11px] font-bold text-gray-400 pt-1">Edge အသံ — အခမဲ့ (0 Credit)</div>
       <div class="space-y-2 text-xs">
         <div onclick="selectVoice('edge_nilar', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-white">Nilar - မိန်းကလေး</span>
+          <span class="font-bold text-white">Nilar - မိန်းကလေး <span class="text-[10px] text-emerald-400 ml-1">(Free)</span></span>
           <button type="button" onclick="playVoiceSample(event, 'edge_nilar', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
         </div>
 
         <div onclick="selectVoice('edge_thiha', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-white">Thiha - ယောက်ျားလေး</span>
+          <span class="font-bold text-white">Thiha - ယောက်ျားလေး <span class="text-[10px] text-emerald-400 ml-1">(Free)</span></span>
           <button type="button" onclick="playVoiceSample(event, 'edge_thiha', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
         </div>
       </div>
 
-      <div class="text-[11px] font-bold text-gray-400 pt-1">Google အသံ — Premium Voices</div>
+      <div class="text-[11px] font-bold text-gray-400 pt-1">Google & Voice Clone — စာလုံး 20 လျှင် 1 Credit</div>
       <div class="space-y-2 text-xs">
         <div onclick="selectVoice('google_Kore', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
           <span class="font-bold text-white">Kore - မိန်းကလေး (တည်ငြိမ်)</span>
@@ -925,46 +977,179 @@ HTML_UI = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- TAB 2: PLANS -->
+  <!-- TAB 2: ငွေဖြည့် / CREDIT PACKAGES (MATCHES SCREENSHOT EXACTLY!) -->
   <div id="tab-plans" class="hidden px-4 mt-3 space-y-3">
-    <div class="card-dark p-4 rounded-2xl border-teal-500/40 space-y-2">
-      <h2 class="font-bold text-sm text-teal-400">💳 ငွေလွှဲလက်ခံမည့် အကောင့်များ</h2>
-      <p class="text-xs text-gray-300">အမည်: <b class="text-white">Kaung San Phyo</b></p>
-      <div class="flex items-center justify-between bg-[#10121b] p-3 rounded-xl border border-gray-800">
-        <div>
-          <p class="text-[11px] text-gray-400">KBZPay / WavePay / UABPay</p>
-          <p class="font-mono font-bold text-base text-amber-400">09409700002</p>
+    <div class="flex items-center justify-between">
+      <h2 class="font-extrabold text-base text-white">💳 ငွေဖြည့် (Credit ဝယ်ယူရန်)</h2>
+      <span class="bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 px-3 py-1 rounded-full text-xs font-extrabold">
+        လက်ကျန်: <span id="planBalanceLabel">100</span> Credit
+      </span>
+    </div>
+
+    <p class="text-xs font-bold text-gray-300">၁ · Package ရွေးပါ</p>
+
+    <!-- PACKAGE 1: STARTER -->
+    <div onclick="selectPackage('Starter', '10,000 ကျပ် (≈ 80 บาท)', 10000, this)" class="pkg-card card-dark p-4 rounded-2xl space-y-3 cursor-pointer border border-gray-800">
+      <div class="flex justify-between items-start">
+        <div class="flex items-center gap-2.5">
+          <div class="pkg-radio w-5 h-5 rounded-full border-2 border-gray-500 flex items-center justify-center"></div>
+          <span class="font-extrabold text-base text-white">Starter</span>
         </div>
-        <button onclick="copyPhone()" class="grad-pill text-xs px-3.5 py-2 rounded-xl">Copy</button>
+        <div class="text-right">
+          <div class="font-extrabold text-base text-white">10,000 ကျပ်</div>
+          <div class="text-[11px] text-gray-400">≈ 80 บาท</div>
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-2 bg-[#10121b] p-2.5 rounded-xl text-center">
+        <div>
+          <div class="text-[10px] text-gray-400">ရမယ့် Credit</div>
+          <div class="font-extrabold text-sm text-emerald-400">10,000</div>
+          <div class="text-[10px] text-gray-400">Credits</div>
+        </div>
+        <div class="border-x border-gray-800">
+          <div class="text-[10px] text-gray-400">5 မိနစ် video</div>
+          <div class="font-extrabold text-sm text-white">≈ 28</div>
+          <div class="text-[9px] text-gray-400">တစ်ပုဒ် ~350 ကျပ်</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-gray-400">10 မိနစ် video</div>
+          <div class="font-extrabold text-sm text-white">≈ 15</div>
+          <div class="text-[9px] text-gray-400">တစ်ပုဒ် ~630 ကျပ်</div>
+        </div>
       </div>
     </div>
 
-    <div onclick="selectPlan('Starter Plan', '15,000 MMK', 1500)" class="card-dark p-4 rounded-2xl flex justify-between items-center cursor-pointer">
-      <div><h3 class="font-bold text-sm">Starter Plan</h3><p class="text-xs text-gray-400">1,500 Points</p></div>
-      <span class="grad-pill text-xs px-3 py-1.5 rounded-xl">15,000 MMK</span>
-    </div>
-    <div onclick="selectPlan('Pro Plan', '40,000 MMK', 5000)" class="card-dark p-4 rounded-2xl flex justify-between items-center cursor-pointer border-amber-400/50">
-      <div><h3 class="font-bold text-sm text-amber-300">Pro Plan 🔥</h3><p class="text-xs text-gray-400">5,000 Points</p></div>
-      <span class="grad-pill text-xs px-3 py-1.5 rounded-xl">40,000 MMK</span>
-    </div>
-    <div onclick="selectPlan('Business Plan', '88,000 MMK', 12500)" class="card-dark p-4 rounded-2xl flex justify-between items-center cursor-pointer">
-      <div><h3 class="font-bold text-sm text-purple-300">Business Plan</h3><p class="text-xs text-gray-400">12,500 Points</p></div>
-      <span class="grad-pill text-xs px-3 py-1.5 rounded-xl">88,000 MMK</span>
+    <!-- PACKAGE 2: STANDARD (+15% BONUS) -->
+    <div onclick="selectPackage('Standard (+15% Bonus)', '30,000 ကျပ် (≈ 240 บาท)', 34500, this)" class="pkg-card card-dark p-4 rounded-2xl space-y-3 cursor-pointer border-2 border-emerald-500">
+      <div class="flex justify-between items-start">
+        <div class="flex items-start gap-2.5">
+          <div class="pkg-radio w-5 h-5 rounded-full border-2 border-emerald-400 bg-emerald-400 flex items-center justify-center mt-0.5">
+            <span class="w-2 h-2 rounded-full bg-gray-950"></span>
+          </div>
+          <div>
+            <div class="flex items-center gap-1.5 flex-wrap">
+              <span class="font-extrabold text-base text-white">Standard</span>
+              <span class="bg-gray-800 text-white text-[10px] px-2 py-0.5 rounded-full font-bold">လူကြိုက်အများဆုံး</span>
+            </div>
+            <span class="inline-block mt-1 bg-emerald-500/20 text-emerald-300 text-[10px] font-extrabold px-2 py-0.5 rounded-full">+15% Bonus</span>
+          </div>
+        </div>
+        <div class="text-right">
+          <div class="font-extrabold text-base text-white">30,000 ကျပ်</div>
+          <div class="text-[11px] text-gray-400">≈ 240 บาท</div>
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-2 bg-[#10121b] p-2.5 rounded-xl text-center">
+        <div>
+          <div class="text-[10px] text-gray-400">ရမယ့် Credit</div>
+          <div class="font-extrabold text-sm text-emerald-400">34,500</div>
+          <div class="text-[10px] text-gray-400">Credits</div>
+        </div>
+        <div class="border-x border-gray-800">
+          <div class="text-[10px] text-gray-400">5 မိနစ် video</div>
+          <div class="font-extrabold text-sm text-white">≈ 98</div>
+          <div class="text-[9px] text-gray-400">တစ်ပုဒ် ~305 ကျပ်</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-gray-400">10 မိနစ် video</div>
+          <div class="font-extrabold text-sm text-white">≈ 54</div>
+          <div class="text-[9px] text-gray-400">တစ်ပုဒ် ~550 ကျပ်</div>
+        </div>
+      </div>
     </div>
 
-    <div id="paymentBox" class="hidden card-dark p-4 rounded-2xl space-y-3 border-emerald-500/40">
-      <p class="text-xs font-bold text-emerald-400">ရွေးထားသော Plan: <span id="selectedPlanLabel"></span></p>
-      <input type="file" id="receiptFile" accept="image/*" class="w-full text-xs bg-[#10121b] p-2.5 rounded-xl border border-gray-800" />
-      <button onclick="submitPayment()" class="w-full py-3 rounded-xl grad-btn text-xs">✅ ငွေလွှဲပြေစာ ပေးပို့မည်</button>
+    <!-- PACKAGE 3: PRO (+20% BONUS) -->
+    <div onclick="selectPackage('Pro (+20% Bonus)', '50,000 ကျပ် (≈ 400 บาท)', 60000, this)" class="pkg-card card-dark p-4 rounded-2xl space-y-3 cursor-pointer border border-gray-800">
+      <div class="flex justify-between items-start">
+        <div class="flex items-center gap-2.5">
+          <div class="pkg-radio w-5 h-5 rounded-full border-2 border-gray-500 flex items-center justify-center"></div>
+          <div>
+            <div class="flex items-center gap-1.5">
+              <span class="font-extrabold text-base text-white">Pro</span>
+              <span class="bg-emerald-500/20 text-emerald-300 text-[10px] font-extrabold px-2 py-0.5 rounded-full">+20% Bonus</span>
+            </div>
+          </div>
+        </div>
+        <div class="text-right">
+          <div class="font-extrabold text-base text-white">50,000 ကျပ်</div>
+          <div class="text-[11px] text-gray-400">≈ 400 บาท</div>
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-2 bg-[#10121b] p-2.5 rounded-xl text-center">
+        <div>
+          <div class="text-[10px] text-gray-400">ရမယ့် Credit</div>
+          <div class="font-extrabold text-sm text-emerald-400">60,000</div>
+          <div class="text-[10px] text-gray-400">Credits</div>
+        </div>
+        <div class="border-x border-gray-800">
+          <div class="text-[10px] text-gray-400">5 မိနစ် video</div>
+          <div class="font-extrabold text-sm text-white">≈ 171</div>
+          <div class="text-[9px] text-gray-400">တစ်ပုဒ် ~290 ကျပ်</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-gray-400">10 မိနစ် video</div>
+          <div class="font-extrabold text-sm text-white">≈ 95</div>
+          <div class="text-[9px] text-gray-400">တစ်ပုဒ် ~525 ကျပ်</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="text-[11px] text-gray-400 leading-relaxed">
+      * စာသားမှ အသံပြောင်းခြင်းအတွက် စာသားအလုံး ၂၀ လျှင် 1 Credit (၁ လုံး = 0.05 Credit) နှုန်းဖြင့် နုတ်ယူပါသည်။
+    </p>
+
+    <!-- STEP 2: PAYMENT METHOD (KBZPay, WavePay, PromptPay) -->
+    <p class="text-xs font-bold text-gray-300 pt-1">၂ · ငွေပေးနည်း ရွေးပါ</p>
+    <div class="grid grid-cols-3 gap-2 text-center">
+      <div onclick="selectPayMethod('KBZPay', this)" class="pay-card p-3 rounded-2xl bg-[#1e2030] border-2 border-sky-400 cursor-pointer">
+        <div class="inline-block bg-sky-600 text-white font-black text-[10px] px-2 py-0.5 rounded">KBZ</div>
+        <div class="font-bold text-xs text-white mt-1">KBZPay</div>
+        <div class="text-[9px] text-gray-400">မြန်မာ · KPay</div>
+      </div>
+      <div onclick="selectPayMethod('WavePay', this)" class="pay-card p-3 rounded-2xl bg-[#1e2030] border border-gray-800 cursor-pointer">
+        <div class="inline-block bg-amber-400 text-gray-950 font-black text-[10px] px-2 py-0.5 rounded">Wave</div>
+        <div class="font-bold text-xs text-white mt-1">WavePay</div>
+        <div class="text-[9px] text-gray-400">မြန်မာ · Wave</div>
+      </div>
+      <div onclick="selectPayMethod('PromptPay', this)" class="pay-card p-3 rounded-2xl bg-[#1e2030] border border-gray-800 cursor-pointer">
+        <div class="inline-block bg-indigo-500 text-white font-black text-[10px] px-2 py-0.5 rounded">PP</div>
+        <div class="font-bold text-xs text-white mt-1">PromptPay</div>
+        <div class="text-[9px] text-gray-400">ထိုင်း · บาท</div>
+      </div>
+    </div>
+
+    <!-- ACCOUNT DETAILS & RECEIPT UPLOAD BOX -->
+    <div class="card-dark p-4 rounded-2xl space-y-3 border-emerald-500/40">
+      <div class="flex justify-between items-center bg-[#10121b] p-3 rounded-xl border border-gray-800">
+        <div>
+          <p class="text-[11px] text-gray-400" id="payAccountTitle">KBZPay အကောင့် (Kaung San Phyo)</p>
+          <p class="font-mono font-bold text-base text-amber-400" id="payAccountNumber">09409700002</p>
+        </div>
+        <button onclick="copyPhone()" class="grad-pill text-xs px-3.5 py-2 rounded-xl">Copy</button>
+      </div>
+
+      <div class="text-xs text-gray-300">
+        ရွေးထားသော Package: <b id="selectedPlanLabel" class="text-emerald-400">Standard (+15% Bonus) - 34,500 Credits</b>
+      </div>
+
+      <div>
+        <label class="block text-xs text-gray-300 mb-1.5">ငွေလွှဲပြေစာ (Screenshot) တင်ပေးပါ:</label>
+        <input type="file" id="receiptFile" accept="image/*" class="w-full text-xs bg-[#10121b] p-2.5 rounded-xl border border-gray-800" />
+      </div>
+
+      <button onclick="submitPayment()" id="paySubmitBtn" class="w-full py-3.5 rounded-xl grad-btn text-sm shadow-lg">
+        ✅ ဆက်မယ် (ငွေလွှဲပြေစာ ပေးပို့မည်)
+      </button>
     </div>
   </div>
 
   <!-- TAB 3: PROFILE -->
   <div id="tab-profile" class="hidden px-4 mt-3 space-y-3">
-    <div class="card-dark p-4 rounded-2xl space-y-2">
-      <h2 class="font-bold text-sm text-teal-400">👤 Profile</h2>
+    <div class="card-dark p-4 rounded-2xl space-y-2.5">
+      <h2 class="font-bold text-sm text-teal-400">👤 အကောင့်အချက်အလက်</h2>
       <p class="text-xs text-gray-300">Telegram ID: <span id="profId" class="font-mono text-white"></span></p>
-      <p class="text-xs text-gray-300">လက်ကျန် Point: <span id="profPts" class="font-bold text-amber-400"></span></p>
+      <p class="text-xs text-gray-300">လက်ကျန် Credit: <span id="profPts" class="font-bold text-emerald-400"></span></p>
+      <p class="text-xs text-gray-300">Credit နှုန်းထား: <span class="text-amber-300">စာသားအလုံး 20 = 1 Credit (၁ လုံး = 0.05 Credit)</span></p>
       <p class="text-xs text-gray-300">Tool: <span class="text-white font-bold">Movie Myanmar Ai</span></p>
     </div>
   </div>
@@ -973,9 +1158,9 @@ HTML_UI = """<!DOCTYPE html>
   <div id="tab-earn" class="hidden px-4 mt-3 space-y-3">
     <div class="card-dark p-5 rounded-2xl text-center space-y-3">
       <div class="text-3xl">🎁</div>
-      <h2 class="font-bold text-base">အခမဲ့ Point စုဆောင်းပါ</h2>
-      <p class="text-xs text-gray-400">ကြော်ငြာကြည့်ပြီး Point များ အခမဲ့ ရယူနိုင်သလို Free Edge အသံများကို အမြဲ အခမဲ့ သုံးနိုင်ပါသည်။</p>
-      <button onclick="earnFreePoints()" class="w-full py-3 rounded-xl grad-btn text-sm">📺 ကြော်ငြာကြည့်ပြီး +5 Points ယူမည်</button>
+      <h2 class="font-bold text-base">အခမဲ့ Credit စုဆောင်းပါ</h2>
+      <p class="text-xs text-gray-400">ကြော်ငြာကြည့်ပြီး Credit များ အခမဲ့ ရယူနိုင်သလို Free Edge အသံများကို အမြဲ အခမဲ့ သုံးနိုင်ပါသည်။</p>
+      <button onclick="earnFreePoints()" class="w-full py-3 rounded-xl grad-btn text-sm">📺 ကြော်ငြာကြည့်ပြီး +5 Credits ယူမည်</button>
     </div>
   </div>
 
@@ -996,7 +1181,7 @@ HTML_UI = """<!DOCTYPE html>
   <!-- BOTTOM NAV -->
   <div class="fixed bottom-0 inset-x-0 bg-[#12131c]/95 backdrop-blur border-t border-gray-800 grid grid-cols-4 text-center py-2 text-[11px] font-bold z-30">
     <button onclick="showTab('studio')" id="nav-studio" class="nav-active flex flex-col items-center gap-0.5"><span>🎙️</span><span>Studio</span></button>
-    <button onclick="showTab('plans')" id="nav-plans" class="text-gray-400 flex flex-col items-center gap-0.5"><span>⭐</span><span>Plans</span></button>
+    <button onclick="showTab('plans')" id="nav-plans" class="text-gray-400 flex flex-col items-center gap-0.5"><span>💳</span><span>ငွေဖြည့်</span></button>
     <button onclick="showTab('profile')" id="nav-profile" class="text-gray-400 flex flex-col items-center gap-0.5"><span>👤</span><span>Profile</span></button>
     <button onclick="showTab('earn')" id="nav-earn" class="text-gray-400 flex flex-col items-center gap-0.5"><span>🪙</span><span>Earn</span></button>
   </div>
@@ -1033,18 +1218,45 @@ HTML_UI = """<!DOCTYPE html>
       ratio: "original",
       resolution: "original",
       lastVideoUrl: "",
-      selectedPlan: {}
+      selectedPlan: { name: "Standard (+15% Bonus)", amount: "30,000 ကျပ် (≈ 240 บาท)", pts: 34500 },
+      payMethod: "KBZPay"
     };
 
     async function loadUser() {
       try {
         const res = await fetch(`/api/user/${userId}`);
         const data = await res.json();
-        document.getElementById("userPoints").innerText = data.points;
-        document.getElementById("profPts").innerText = data.points + " points";
+        document.getElementById("userPoints").innerText = data.points.toLocaleString();
+        document.getElementById("profPts").innerText = data.points.toLocaleString() + " Credits";
+        document.getElementById("planBalanceLabel").innerText = data.points.toLocaleString();
       } catch(e) {}
     }
     loadUser();
+
+    // REAL-TIME CREDIT CALCULATOR (20 CHARS = 1 CREDIT)
+    function calcCredits(str) {
+      const len = str.trim().length;
+      if (len === 0) return { len: 0, credits: 0 };
+      return { len: len, credits: Math.max(1, Math.ceil(len / 20)) };
+    }
+
+    function updateTtsCreditCalc() {
+      const txt = document.getElementById("ttsOnlyText").value;
+      const info = calcCredits(txt);
+      document.getElementById("ttsCharCount").innerText = info.len;
+      const isFree = ["auto_duo", "edge_nilar", "edge_thiha"].includes(state.voice);
+      document.getElementById("ttsCreditCost").innerText = isFree ? `0 (Free အသံ) / Premium ဆိုလျှင် ${info.credits}` : info.credits;
+    }
+
+    function updateRecapCreditCalc() {
+      const txt = document.getElementById("recapScript").value;
+      // Strip timestamp tags [00:00 - 00:00] [M] before counting spoken characters
+      const clean = txt.replace(/\[\d{1,2}:\d{2}(?:\.\d+)?\s*-\s*\d{1,2}:\d{2}(?:\.\d+)?\]\s*(?:\[[MF]\])?/g, "").trim();
+      const info = calcCredits(clean);
+      document.getElementById("recapCharCount").innerText = info.len;
+      const isFree = ["auto_duo", "edge_nilar", "edge_thiha"].includes(state.voice);
+      document.getElementById("recapCreditCost").innerText = isFree ? `0 Credit (Free အသံ)` : `${info.credits} Credits`;
+    }
 
     function showTab(tab) {
       ["studio", "plans", "profile", "earn"].forEach(t => {
@@ -1064,12 +1276,14 @@ HTML_UI = """<!DOCTYPE html>
         document.getElementById("renderSection").classList.add("hidden");
         document.getElementById("modeBtn-tts").className = "py-2.5 rounded-xl text-xs font-extrabold grad-pill flex items-center justify-center gap-1.5 shadow";
         document.getElementById("modeBtn-video").className = "py-2.5 rounded-xl text-xs font-bold text-gray-300 flex items-center justify-center gap-1.5";
+        updateTtsCreditCalc();
       } else {
         document.getElementById("section-video").classList.remove("hidden");
         document.getElementById("renderSection").classList.remove("hidden");
         document.getElementById("section-tts").classList.add("hidden");
         document.getElementById("modeBtn-video").className = "py-2.5 rounded-xl text-xs font-extrabold grad-pill flex items-center justify-center gap-1.5 shadow";
         document.getElementById("modeBtn-tts").className = "py-2.5 rounded-xl text-xs font-bold text-gray-300 flex items-center justify-center gap-1.5";
+        updateRecapCreditCalc();
       }
     }
 
@@ -1093,6 +1307,8 @@ HTML_UI = """<!DOCTYPE html>
       });
       el.classList.remove("border", "border-gray-800");
       el.classList.add("border-2", "border-amber-400");
+      updateTtsCreditCalc();
+      updateRecapCreditCalc();
     }
 
     function selectStyle(st, el) {
@@ -1286,6 +1502,7 @@ HTML_UI = """<!DOCTYPE html>
         try { data = JSON.parse(rawText); } catch(e) { throw new Error(rawText); }
         if (!res.ok) throw new Error(data.detail || "Error");
         document.getElementById("recapScript").value = data.script;
+        updateRecapCreditCalc();
       } catch (e) {
         alert(e.message);
       } finally {
@@ -1354,7 +1571,13 @@ HTML_UI = """<!DOCTYPE html>
         let data = {};
         try { data = JSON.parse(rawText); } catch(e) { throw new Error(rawText); }
         clearInterval(timer);
-        if (!res.ok) throw new Error(data.detail || "Render failed");
+        if (!res.ok) {
+          if (res.status === 402) {
+            alert(data.detail);
+            showTab("plans");
+          }
+          throw new Error(data.detail || "Render failed");
+        }
 
         fill.style.width = "100%";
         pctLabel.innerText = "100%";
@@ -1404,7 +1627,11 @@ HTML_UI = """<!DOCTYPE html>
       const res = await fetch("/api/tts", { method: "POST", body: fd });
       const data = await res.json();
       btn.innerText = "🔊 အသံဖိုင် ထုတ်မည်";
-      if (!res.ok) return alert(data.detail);
+      if (!res.ok) {
+        alert(data.detail);
+        if (res.status === 402) showTab("plans");
+        return;
+      }
       const aud = document.getElementById("ttsOnlyAudio");
       aud.src = data.audio_url;
       aud.classList.remove("hidden");
@@ -1433,20 +1660,73 @@ HTML_UI = """<!DOCTYPE html>
       document.getElementById("cloneModal").classList.add("hidden");
     }
 
+    // PACKAGE & PAYMENT METHOD SELECTION
+    function selectPackage(name, amount, pts, el) {
+      state.selectedPlan = { name, amount, pts };
+      document.querySelectorAll(".pkg-card").forEach(c => {
+        c.classList.remove("border-2", "border-emerald-500");
+        c.classList.add("border", "border-gray-800");
+        const r = c.querySelector(".pkg-radio");
+        r.className = "pkg-radio w-5 h-5 rounded-full border-2 border-gray-500 flex items-center justify-center";
+        r.innerHTML = "";
+      });
+      el.classList.remove("border", "border-gray-800");
+      el.classList.add("border-2", "border-emerald-500");
+      const radio = el.querySelector(".pkg-radio");
+      radio.className = "pkg-radio w-5 h-5 rounded-full border-2 border-emerald-400 bg-emerald-400 flex items-center justify-center";
+      radio.innerHTML = '<span class="w-2 h-2 rounded-full bg-gray-950"></span>';
+
+      document.getElementById("selectedPlanLabel").innerText = `${name} - ${pts.toLocaleString()} Credits (${amount})`;
+    }
+
+    function selectPayMethod(method, el) {
+      state.payMethod = method;
+      document.querySelectorAll(".pay-card").forEach(c => {
+        c.classList.remove("border-2", "border-sky-400");
+        c.classList.add("border", "border-gray-800");
+      });
+      el.classList.remove("border", "border-gray-800");
+      el.classList.add("border-2", "border-sky-400");
+
+      if (method === "PromptPay") {
+        document.getElementById("payAccountTitle").innerText = "PromptPay (ထိုင်းဘတ်ဖြင့် လွှဲရန် - Kaung San Phyo)";
+        document.getElementById("payAccountNumber").innerText = "09409700002 (PromptPay / KPay)";
+      } else {
+        document.getElementById("payAccountTitle").innerText = `${method} အကောင့် (Kaung San Phyo)`;
+        document.getElementById("payAccountNumber").innerText = "09409700002";
+      }
+    }
+
     function copyPhone() { navigator.clipboard.writeText("09409700002"); alert("09409700002 (Kaung San Phyo) ကို Copy ကူးပြီးပါပြီ။"); }
-    function selectPlan(name, amount, pts) { state.selectedPlan = { name, amount, pts }; document.getElementById("selectedPlanLabel").innerText = `${name} (${amount} - ${pts} pts)`; document.getElementById("paymentBox").classList.remove("hidden"); }
+
     async function submitPayment() {
       const file = document.getElementById("receiptFile").files[0];
-      if (!file) return alert("ပြေစာပုံ ရွေးပါ။");
+      if (!file) return alert("ငွေလွှဲပြေစာ ပုံရွေးပါ။");
+      const btn = document.getElementById("paySubmitBtn");
+      btn.innerText = "⏳ ပေးပို့နေပါသည်...";
+      btn.disabled = true;
+
       const fd = new FormData();
-      fd.append("user_id", userId); fd.append("plan_name", state.selectedPlan.name); fd.append("amount", state.selectedPlan.amount); fd.append("points", state.selectedPlan.pts); fd.append("receipt", file);
+      fd.append("user_id", userId);
+      fd.append("plan_name", state.selectedPlan.name);
+      fd.append("amount", state.selectedPlan.amount);
+      fd.append("points", state.selectedPlan.pts);
+      fd.append("pay_method", state.payMethod);
+      fd.append("receipt", file);
+
       const res = await fetch("/api/submit-payment", { method: "POST", body: fd });
-      if (res.ok) { alert("✅ ပြေစာ ပေးပို့ပြီးပါပြီ!"); document.getElementById("paymentBox").classList.add("hidden"); }
+      btn.innerText = "✅ ဆက်မယ် (ငွေလွှဲပြေစာ ပေးပို့မည်)";
+      btn.disabled = false;
+      if (res.ok) {
+        alert("✅ ငွေလွှဲပြေစာ ပေးပို့ပြီးပါပြီ! Admin စစ်ဆေးပြီးပါက Credit ထည့်ပေးပါမည်။");
+        document.getElementById("receiptFile").value = "";
+      }
     }
+
     async function earnFreePoints() {
       const fd = new FormData(); fd.append("user_id", userId);
       const res = await fetch("/api/earn-ad", { method: "POST", body: fd });
-      if (res.ok) { alert("🎉 +5 Points ရရှိပါပြီ!"); loadUser(); }
+      if (res.ok) { alert("🎉 +5 Credits ရရှိပါပြီ!"); loadUser(); }
     }
   </script>
 </body>
@@ -1498,21 +1778,20 @@ async def api_tts(
     user = get_or_create_user(user_id)
     file_id = str(uuid.uuid4())[:8]
     out_path = f"outputs/tts_{file_id}.mp3"
+    credit_cost = calc_text_credits(text)
 
     if voice_type == "cloned":
-        cost = max(1, len(text) // 20)
-        if user["points"] < cost:
-            raise HTTPException(status_code=402, detail="Point မလုံလောက်ပါ။ Free Edge အသံများကို ပြောင်းသုံးနိုင်ပါသည်။")
+        if user["points"] < credit_cost:
+            raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
         if not user["cloned_voice_id"]:
             raise HTTPException(status_code=400, detail="အသံတူပွား (Voice Clone) အရင်ဖန်တီးပါ။")
         generate_cloned_tts(text, user["cloned_voice_id"], out_path)
-        update_points(user_id, -cost)
+        update_points(user_id, -credit_cost)
     elif voice_type in GOOGLE_VOICES:
-        cost = max(1, len(text) // 25)
-        if user["points"] < cost:
-            raise HTTPException(status_code=402, detail="Point မလုံလောက်ပါ။ Free Edge အသံ (Nilar / Thiha) ကို အခမဲ့ သုံးနိုင်ပါသည်။")
+        if user["points"] < credit_cost:
+            raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
         generate_google_gemini_tts(text, GOOGLE_VOICES[voice_type]["name"], speaking_style, out_path)
-        update_points(user_id, -cost)
+        update_points(user_id, -credit_cost)
     else:
         v_key = voice_type if voice_type in EDGE_VOICES else "edge_thiha"
         await generate_edge_tts(text, v_key, speaking_style, speed, out_path)
@@ -1631,10 +1910,6 @@ async def api_render_recap(
 
         vf_str = ",".join(filters) if filters else "null"
 
-        # ORIGINAL AUDIO HANDLING:
-        # "bgm_only": Removes center vocals via stereo phase cancellation while keeping background BGM/SFX!
-        # "low": Keeps subtle 8% original audio
-        # "mute": Removes original audio completely
         if orig_audio_mode == "bgm_only" and vid_has_audio:
             filter_complex = (
                 f"[0:v]{vf_str}[v];"
@@ -1681,10 +1956,20 @@ async def api_send_to_tg(user_id: int = Form(...), video_url: str = Form(...)):
     return {"status": "sent"}
 
 @app.post("/api/submit-payment")
-async def api_submit_payment(user_id: int = Form(...), plan_name: str = Form(...), amount: str = Form(...), points: int = Form(...), receipt: UploadFile = File(...)):
+async def api_submit_payment(
+    user_id: int = Form(...),
+    plan_name: str = Form(...),
+    amount: str = Form(...),
+    points: int = Form(...),
+    pay_method: str = Form("KBZPay"),
+    receipt: UploadFile = File(...)
+):
     conn = sqlite3.connect("movie_myanmar_ai.db")
     c = conn.cursor()
-    c.execute("INSERT INTO payments (user_id, plan_name, amount, points) VALUES (?, ?, ?, ?)", (user_id, plan_name, amount, points))
+    c.execute(
+        "INSERT INTO payments (user_id, plan_name, amount, points, pay_method) VALUES (?, ?, ?, ?, ?)",
+        (user_id, plan_name, amount, points, pay_method)
+    )
     payment_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -1700,7 +1985,13 @@ async def api_submit_payment(user_id: int = Form(...), plan_name: str = Form(...
             await tg_app.bot.send_photo(
                 chat_id=ADMIN_ID,
                 photo=photo,
-                caption=f"💰 **ငွေလွှဲပြေစာ အသစ် (#{payment_id})**\n👤 User ID: `{user_id}`\n📦 Plan: **{plan_name}** ({amount})\n💎 Points: **+{points} pts**",
+                caption=(
+                    f"💰 **ငွေဖြည့်ပြေစာ အသစ် (#{payment_id})**\n"
+                    f"👤 User ID: `{user_id}`\n"
+                    f"📦 Package: **{plan_name}**\n"
+                    f"💵 ငွေပမာဏ: **{amount}** ({pay_method})\n"
+                    f"💎 Credit: **+{points:,} Credits**"
+                ),
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode="Markdown"
             )
