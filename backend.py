@@ -83,7 +83,6 @@ def update_points(user_id: int, delta: int):
     conn.close()
 
 def calc_text_credits(text: str) -> int:
-    # 20 characters = 1 Credit (1 character = 0.05 Credit), minimum 1 Credit if text is non-empty
     clean_len = len(text.strip())
     if clean_len == 0:
         return 0
@@ -131,19 +130,20 @@ def format_srt_time(sec: float) -> str:
     ms = int((sec - int(sec)) * 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-# --- EDGE TTS (FREE) & SPEAKING STYLES ---
+# --- EDGE TTS (FREE) & SPEAKING STYLES (INCLUDING NEW MOVIE RECAP STYLE) ---
 EDGE_VOICES = {
     "edge_nilar": {
         "voice": "my-MM-NilarNeural",
-        "sample": "မင်္ဂလာပါရှင်။ ကျွန်မကတော့ နီလာ ဖြစ်ပါတယ်။ ဇာတ်ကောင်စကားပြောတဲ့အချိန်မှ ကွက်တိ ပြောပြပေးပါမယ်။"
+        "sample": "ကောင်လေးက သံချပ်ကာကို နှိပ်လိုက်တော့ အားလုံး အံ့ဩသွားကြပါပြီ။ နောက်တစ်စက္ကန့်မှာ ဘာဆက်ဖြစ်မလဲ ကြည့်လိုက်ရအောင်။"
     },
     "edge_thiha": {
         "voice": "my-MM-ThihaNeural",
-        "sample": "မင်္ဂလာပါခင်ဗျာ။ ကျွန်တော်ကတော့ သီဟ ဖြစ်ပါတယ်။ ဇာတ်ကောင်စကားပြောတဲ့အချိန်မှ သဘာဝကျကျ ပြောပြပေးပါမယ်။"
+        "sample": "ကောင်လေးက သံချပ်ကာကို နှိပ်လိုက်တော့ အားလုံး အံ့ဩပြီး လှုပ်ရှားလာပါပြီ။ သင်သာဆိုရင် ဘာလုပ်မလဲ Comment မှာ ရေးခဲ့ပါ။"
     }
 }
 
 SPEAKING_STYLES = {
+    "movie_recap": {"pitch": "+2Hz", "rate": "+14%"},
     "storytelling": {"pitch": "+0Hz", "rate": "+2%"},
     "thriller": {"pitch": "-6Hz", "rate": "-6%"},
     "calm": {"pitch": "-2Hz", "rate": "-4%"},
@@ -153,7 +153,7 @@ SPEAKING_STYLES = {
 
 async def generate_edge_tts(text: str, voice_key: str, style_key: str, speed_mult: float, out_path: str):
     v_cfg = EDGE_VOICES.get(voice_key, EDGE_VOICES["edge_thiha"])
-    s_cfg = SPEAKING_STYLES.get(style_key, SPEAKING_STYLES["storytelling"])
+    s_cfg = SPEAKING_STYLES.get(style_key, SPEAKING_STYLES["movie_recap"])
 
     base_rate = int(s_cfg["rate"].replace("%", ""))
     extra_rate = int((speed_mult - 1.0) * 100)
@@ -183,12 +183,13 @@ def generate_google_gemini_tts(text: str, google_voice_name: str, style_key: str
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။ Free Edge အသံများကို သုံးနိုင်ပါသည်။")
 
     style_desc = {
+        "movie_recap": "fast-paced, punchy, exciting Burmese TikTok/YouTube movie recap narrator tone",
         "storytelling": "natural Burmese dialogue and storytelling tone",
         "thriller": "suspenseful, mysterious, dramatic thriller tone",
         "calm": "calm, soothing, gentle tone",
         "energetic": "energetic, fast-paced, lively tone",
         "original": "natural neutral Burmese speaking tone"
-    }.get(style_key, "natural Burmese speaking tone")
+    }.get(style_key, "fast-paced Burmese movie recap narrator tone")
 
     prompt = f"Read the following Burmese line aloud in a {style_desc}. Speak clearly in Burmese:\n\n{text}"
     payload = {
@@ -258,31 +259,42 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- TIMESTAMP-SYNCED DIALOGUE TRANSLATION ---
-def call_gemini_dialogue_sync(audio_path: str, duration_sec: float, pov_mode: str) -> str:
+# --- FAST AUTO TRANSLATE (SUPPORTS BOTH DIALOGUE SYNC & MOVIE RECAP NARRATION) ---
+def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, speaking_style: str) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။")
 
     with open(audio_path, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    pov_instruction = {
-        "direct": "Translate ONLY when characters actually speak. Keep exact dialogue POV (natural conversational Burmese).",
-        "third": "Narrate or translate ONLY during speech segments in natural Third-Person Burmese style.",
-        "first": "Translate/dub ONLY during speech segments in natural First-Person conversational Burmese style."
-    }.get(pov_mode, "Translate ONLY when characters speak into natural conversational Burmese.")
+    # If user picked Movie Recap style, generate punchy continuous Burmese Movie Recap narration like the sample video
+    if speaking_style == "movie_recap":
+        target_chars = max(60, int(duration_sec * 17)) if duration_sec > 0 else 300
+        prompt = (
+            f"Listen to this video audio (duration: {duration_sec:.1f} seconds). "
+            f"Write an exciting, fast-paced Burmese TikTok/YouTube Movie Recap narration script explaining the scene dramatically "
+            f"(using engaging Burmese recap endings like '...ပါပြီ', '...ခဲ့ပါတယ်', and ending with a short question asking viewers to comment like '...သင်ဆိုရင် ဘာလုပ်မလဲ Comment မှာ ရေးခဲ့ပါ'). "
+            f"Keep the length around {target_chars} Burmese characters so it fits the {duration_sec:.1f} second video cleanly. "
+            f"Output ONLY the Burmese narration script without timestamps or English."
+        )
+    else:
+        pov_instruction = {
+            "direct": "Translate ONLY when characters actually speak. Keep exact dialogue POV (natural conversational Burmese).",
+            "third": "Narrate or translate ONLY during speech segments in natural Third-Person Burmese style.",
+            "first": "Translate/dub ONLY during speech segments in natural First-Person conversational Burmese style."
+        }.get(pov_mode, "Translate ONLY when characters speak into natural conversational Burmese.")
 
-    prompt = (
-        f"Listen carefully to this audio (total duration: {duration_sec:.1f} seconds). "
-        f"Detect ONLY the exact time segments where people are actually speaking! Do NOT generate speech during silent pauses or music-only gaps. "
-        f"Identify speaker gender ([M] for Male, [F] for Female) for natural back-and-forth dialogue dubbing. "
-        f"{pov_instruction} "
-        f"Keep each Burmese line concise (~14 Burmese characters per second of that segment) so the Burmese voice fits naturally inside that exact time window. "
-        f"Format EVERY spoken segment strictly on its own line like this:\n"
-        f"[00:02 - 00:06] [M] မင်း ဒီကို ဘာလာလုပ်တာလဲ။\n"
-        f"[00:08 - 00:12] [F] ကျွန်မ ရှင့်ကို လာရှာတာပါ။\n"
-        f"Output ONLY these timestamped lines in Burmese without any extra text."
-    )
+        prompt = (
+            f"Listen carefully to this audio (total duration: {duration_sec:.1f} seconds). "
+            f"Detect ONLY the exact time segments where people are actually speaking! Do NOT generate speech during silent pauses or music-only gaps. "
+            f"Identify speaker gender ([M] for Male, [F] for Female) for natural back-and-forth dialogue dubbing. "
+            f"{pov_instruction} "
+            f"Keep each Burmese line concise (~14 Burmese characters per second of that segment) so the Burmese voice fits naturally inside that exact time window. "
+            f"Format EVERY spoken segment strictly on its own line like this:\n"
+            f"[00:02 - 00:06] [M] မင်း ဒီကို ဘာလာလုပ်တာလဲ။\n"
+            f"[00:08 - 00:12] [F] ကျွန်မ ရှင့်ကို လာရှာတာပါ။\n"
+            f"Output ONLY these timestamped lines in Burmese without any extra text."
+        )
 
     payload = {
         "contents": [{
@@ -311,7 +323,7 @@ def call_gemini_dialogue_sync(audio_path: str, duration_sec: float, pov_mode: st
 
     raise HTTPException(status_code=500, detail=f"Gemini Error: {last_err}")
 
-# --- BUILD TIMESTAMP-SYNCED AUDIO TRACK + SRT SUBTITLES ---
+# --- BUILD SYNCED DUBBING / RECAP AUDIO + SRT SUBTITLES ---
 async def build_synced_dub_and_srt(
     script_text: str,
     vid_dur: float,
@@ -338,10 +350,10 @@ async def build_synced_dub_and_srt(
                 segments.append((start_s, end_s, gender, txt))
                 pure_texts.append(txt)
 
-    # Calculate Credit cost: 20 characters = 1 Credit
     total_spoken_text = "".join(pure_texts) if pure_texts else script_text.strip()
     credit_cost = calc_text_credits(total_spoken_text)
 
+    # Continuous Movie Recap mode or plain text without timestamps
     if not segments:
         clean_txt = script_text.strip()
         raw_tts = f"outputs/raw_{job_id}.mp3"
@@ -368,11 +380,21 @@ async def build_synced_dub_and_srt(
         else:
             subprocess.run(["ffmpeg", "-y", "-i", raw_tts, final_audio_out], check=True)
 
+        # Split sentences into clean SRT chunks across the video
+        sentences = [s.strip() for s in re.split(r"[။\n]+", clean_txt) if s.strip()]
+        if not sentences:
+            sentences = [clean_txt]
+        chunk_dur = max(1.5, (vid_dur if vid_dur > 0 else len(sentences) * 3) / len(sentences))
+        srt_blocks = []
+        for idx, sent in enumerate(sentences):
+            st = idx * chunk_dur
+            et = min(vid_dur if vid_dur > 0 else (idx + 1) * chunk_dur, (idx + 1) * chunk_dur)
+            srt_blocks.append(f"{idx + 1}\n{format_srt_time(st)} --> {format_srt_time(et)}\n{sent}\n")
         with open(srt_out, "w", encoding="utf-8") as sf:
-            sf.write(f"1\n00:00:00,500 --> {format_srt_time(max(2.0, vid_dur - 0.5))}\n{clean_txt}\n\n")
+            sf.write("\n".join(srt_blocks))
         return
 
-    # Check Credit balance before rendering paid voices
+    # Timestamp-synced dialogue mode
     if voice_type in ["cloned"] or voice_type in GOOGLE_VOICES:
         if user["points"] < credit_cost:
             raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
@@ -499,7 +521,7 @@ async def start_telegram_bot():
 async def on_startup():
     asyncio.create_task(start_telegram_bot())
 
-# --- FULL PRO UI ---
+# --- FULL PRO UI (NO EARN TAB, UABPay ADDED, MOVIE RECAP STYLE ADDED) ---
 HTML_UI = """<!DOCTYPE html>
 <html lang="my">
 <head>
@@ -576,7 +598,7 @@ HTML_UI = """<!DOCTYPE html>
         <div>
           <h3 class="font-bold text-base text-white flex items-center gap-1.5">🎬 Video ➔ မြန်မာအသံ</h3>
           <p class="text-xs text-gray-400 mt-1 leading-relaxed">
-            ဇာတ်ကောင်စကားပြောတဲ့ စက္ကန့်အတိအကျအလိုက် အပြန်အလှန် စကားပြောပုံစံ အသံထုတ်ပေးပြီး စကားမပြောတဲ့ အခန်းတွေမှာ အလိုအလျောက် ရပ်နားပေးပါတယ်။
+            ဇာတ်ကောင်စကားပြောတဲ့ စက္ကန့်အတိအကျအလိုက် အပြန်အလှန် စကားပြောပုံစံ (သို့) Movie Recap ပုံစံဖြင့် အသံထုတ်ပေးပါတယ်။
           </p>
         </div>
 
@@ -785,7 +807,7 @@ HTML_UI = """<!DOCTYPE html>
           </div>
 
           <button onclick="autoTranslateVideo()" id="autoTransBtn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 font-extrabold text-sm text-white shadow-lg flex items-center justify-center gap-2 active:scale-98 mt-2">
-            ✨ AI Auto ဘာသာပြန် (စကားပြောအချိန်ကွက်တိ ထုတ်မည်)
+            ✨ AI Auto ဘာသာပြန် (စာသားထုတ်မည်)
           </button>
 
           <div class="text-xs font-bold text-amber-300 pt-1">
@@ -808,7 +830,7 @@ HTML_UI = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- TEXT -> VOICE SECTION (WITH DETAILED CREDIT CALCULATOR: 20 CHARS = 1 CREDIT) -->
+    <!-- TEXT -> VOICE SECTION -->
     <div id="section-tts" class="hidden card-dark rounded-2xl p-4 space-y-3">
       <div class="flex justify-between items-center">
         <h3 class="font-bold text-sm text-white">✍️ စာသားမှ မြန်မာအသံ ထုတ်မည်</h3>
@@ -819,7 +841,6 @@ HTML_UI = """<!DOCTYPE html>
 
       <textarea id="ttsOnlyText" oninput="updateTtsCreditCalc()" rows="6" placeholder="အသံထုတ်လိုသော မြန်မာစာသား ရိုက်ထည့်ပါ..." class="w-full bg-[#10121b] border border-gray-800 rounded-xl p-3 text-sm text-white focus:border-teal-400 outline-none"></textarea>
 
-      <!-- DETAILED LIVE CREDIT BREAKDOWN CARD -->
       <div class="bg-[#10121b] border border-indigo-500/30 rounded-xl p-3 space-y-1.5 text-xs">
         <div class="flex justify-between">
           <span class="text-gray-400">📝 ရိုက်ထည့်ထားသော စာလုံးရေ:</span>
@@ -905,13 +926,17 @@ HTML_UI = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- SPEAKING STYLE -->
+      <!-- SPEAKING STYLE (INCLUDES NEW MOVIE RECAP NARRATION STYLE FROM VIDEO) -->
       <div class="pt-2 border-t border-gray-800 space-y-2">
         <div class="text-xs font-extrabold text-amber-400">🎙️ ပြောဟန် (Thiha / Nilar)</div>
         <div class="grid grid-cols-2 gap-2 text-xs">
-          <div onclick="selectStyle('storytelling', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border-2 border-amber-400 cursor-pointer">
-            <div class="font-bold text-amber-300">ပုံပြင်/ဇာတ်ကြောင်းပြော</div>
-            <div class="text-[10px] text-gray-300 mt-0.5">သဘာဝကျကျ ပြောဟန်</div>
+          <div onclick="selectStyle('movie_recap', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border-2 border-amber-400 cursor-pointer col-span-2">
+            <div class="font-bold text-amber-300">🎬 Movie Recap (ဇာတ်ကားပြန်ပြောဟန် 🔥)</div>
+            <div class="text-[10px] text-gray-300 mt-0.5">သွက်သွက်လက်လက် အရှိန်အဟုန်နဲ့ စိတ်ဝင်စားဖွယ် ပြန်ပြောပြဟန် (Video နမူနာပုံစံ)</div>
+          </div>
+          <div onclick="selectStyle('storytelling', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 cursor-pointer">
+            <div class="font-bold text-white">ပုံပြင်/ဇာတ်ကြောင်းပြော</div>
+            <div class="text-[10px] text-gray-400 mt-0.5">သဘာဝကျကျ ပြောဟန်</div>
           </div>
           <div onclick="selectStyle('thriller', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 cursor-pointer">
             <div class="font-bold text-white">သည်းထိတ်ရင်ဖို</div>
@@ -977,7 +1002,7 @@ HTML_UI = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- TAB 2: ငွေဖြည့် / CREDIT PACKAGES (MATCHES SCREENSHOT EXACTLY!) -->
+  <!-- TAB 2: ငွေဖြည့် / CREDIT PACKAGES (KBZPay, WavePay, UABPay) -->
   <div id="tab-plans" class="hidden px-4 mt-3 space-y-3">
     <div class="flex items-center justify-between">
       <h2 class="font-extrabold text-base text-white">💳 ငွေဖြည့် (Credit ဝယ်ယူရန်)</h2>
@@ -1098,7 +1123,7 @@ HTML_UI = """<!DOCTYPE html>
       * စာသားမှ အသံပြောင်းခြင်းအတွက် စာသားအလုံး ၂၀ လျှင် 1 Credit (၁ လုံး = 0.05 Credit) နှုန်းဖြင့် နုတ်ယူပါသည်။
     </p>
 
-    <!-- STEP 2: PAYMENT METHOD (KBZPay, WavePay, PromptPay) -->
+    <!-- STEP 2: PAYMENT METHOD (KBZPay, WavePay, UABPay) -->
     <p class="text-xs font-bold text-gray-300 pt-1">၂ · ငွေပေးနည်း ရွေးပါ</p>
     <div class="grid grid-cols-3 gap-2 text-center">
       <div onclick="selectPayMethod('KBZPay', this)" class="pay-card p-3 rounded-2xl bg-[#1e2030] border-2 border-sky-400 cursor-pointer">
@@ -1111,10 +1136,10 @@ HTML_UI = """<!DOCTYPE html>
         <div class="font-bold text-xs text-white mt-1">WavePay</div>
         <div class="text-[9px] text-gray-400">မြန်မာ · Wave</div>
       </div>
-      <div onclick="selectPayMethod('PromptPay', this)" class="pay-card p-3 rounded-2xl bg-[#1e2030] border border-gray-800 cursor-pointer">
-        <div class="inline-block bg-indigo-500 text-white font-black text-[10px] px-2 py-0.5 rounded">PP</div>
-        <div class="font-bold text-xs text-white mt-1">PromptPay</div>
-        <div class="text-[9px] text-gray-400">ထိုင်း · บาท</div>
+      <div onclick="selectPayMethod('UABPay', this)" class="pay-card p-3 rounded-2xl bg-[#1e2030] border border-gray-800 cursor-pointer">
+        <div class="inline-block bg-emerald-600 text-white font-black text-[10px] px-2 py-0.5 rounded">UAB</div>
+        <div class="font-bold text-xs text-white mt-1">UABPay</div>
+        <div class="text-[9px] text-gray-400">မြန်မာ · UAB</div>
       </div>
     </div>
 
@@ -1154,16 +1179,6 @@ HTML_UI = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- TAB 4: EARN -->
-  <div id="tab-earn" class="hidden px-4 mt-3 space-y-3">
-    <div class="card-dark p-5 rounded-2xl text-center space-y-3">
-      <div class="text-3xl">🎁</div>
-      <h2 class="font-bold text-base">အခမဲ့ Credit စုဆောင်းပါ</h2>
-      <p class="text-xs text-gray-400">ကြော်ငြာကြည့်ပြီး Credit များ အခမဲ့ ရယူနိုင်သလို Free Edge အသံများကို အမြဲ အခမဲ့ သုံးနိုင်ပါသည်။</p>
-      <button onclick="earnFreePoints()" class="w-full py-3 rounded-xl grad-btn text-sm">📺 ကြော်ငြာကြည့်ပြီး +5 Credits ယူမည်</button>
-    </div>
-  </div>
-
   <!-- VOICE CLONE MODAL -->
   <div id="cloneModal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
     <div class="card-dark w-full max-w-sm p-5 rounded-2xl space-y-3">
@@ -1178,12 +1193,11 @@ HTML_UI = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- BOTTOM NAV -->
-  <div class="fixed bottom-0 inset-x-0 bg-[#12131c]/95 backdrop-blur border-t border-gray-800 grid grid-cols-4 text-center py-2 text-[11px] font-bold z-30">
+  <!-- BOTTOM NAV (3 CLEAN TABS: Studio, ငွေဖြည့်, Profile) -->
+  <div class="fixed bottom-0 inset-x-0 bg-[#12131c]/95 backdrop-blur border-t border-gray-800 grid grid-cols-3 text-center py-2 text-[11px] font-bold z-30">
     <button onclick="showTab('studio')" id="nav-studio" class="nav-active flex flex-col items-center gap-0.5"><span>🎙️</span><span>Studio</span></button>
     <button onclick="showTab('plans')" id="nav-plans" class="text-gray-400 flex flex-col items-center gap-0.5"><span>💳</span><span>ငွေဖြည့်</span></button>
     <button onclick="showTab('profile')" id="nav-profile" class="text-gray-400 flex flex-col items-center gap-0.5"><span>👤</span><span>Profile</span></button>
-    <button onclick="showTab('earn')" id="nav-earn" class="text-gray-400 flex flex-col items-center gap-0.5"><span>🪙</span><span>Earn</span></button>
   </div>
 
   <script>
@@ -1207,7 +1221,7 @@ HTML_UI = """<!DOCTYPE html>
     let state = {
       povMode: "direct",
       voice: "auto_duo",
-      speakingStyle: "storytelling",
+      speakingStyle: "movie_recap",
       speed: 1.0,
       maskMode: "blur",
       flipH: false,
@@ -1233,7 +1247,6 @@ HTML_UI = """<!DOCTYPE html>
     }
     loadUser();
 
-    // REAL-TIME CREDIT CALCULATOR (20 CHARS = 1 CREDIT)
     function calcCredits(str) {
       const len = str.trim().length;
       if (len === 0) return { len: 0, credits: 0 };
@@ -1250,7 +1263,6 @@ HTML_UI = """<!DOCTYPE html>
 
     function updateRecapCreditCalc() {
       const txt = document.getElementById("recapScript").value;
-      // Strip timestamp tags [00:00 - 00:00] [M] before counting spoken characters
       const clean = txt.replace(/\[\d{1,2}:\d{2}(?:\.\d+)?\s*-\s*\d{1,2}:\d{2}(?:\.\d+)?\]\s*(?:\[[MF]\])?/g, "").trim();
       const info = calcCredits(clean);
       document.getElementById("recapCharCount").innerText = info.len;
@@ -1259,7 +1271,7 @@ HTML_UI = """<!DOCTYPE html>
     }
 
     function showTab(tab) {
-      ["studio", "plans", "profile", "earn"].forEach(t => {
+      ["studio", "plans", "profile"].forEach(t => {
         document.getElementById("tab-" + t).classList.add("hidden");
         document.getElementById("nav-" + t).classList.remove("nav-active");
         document.getElementById("nav-" + t).classList.add("text-gray-400");
@@ -1489,12 +1501,13 @@ HTML_UI = """<!DOCTYPE html>
       const file = document.getElementById("videoInput").files[0];
       if (!file) return alert("Video ဖိုင် အရင်ရွေးပါ။");
       const btn = document.getElementById("autoTransBtn");
-      btn.innerText = "⚡ စကားပြောအချိန်ကွက်တိ စာသားထုတ်နေပါသည်...";
+      btn.innerText = "⚡ စာသား အမြန်ထုတ်နေပါသည်...";
       btn.disabled = true;
 
       const fd = new FormData();
       fd.append("video", file);
       fd.append("pov_mode", state.povMode);
+      fd.append("speaking_style", state.speakingStyle);
       try {
         const res = await fetch("/api/auto-script", { method: "POST", body: fd });
         const rawText = await res.text();
@@ -1506,7 +1519,7 @@ HTML_UI = """<!DOCTYPE html>
       } catch (e) {
         alert(e.message);
       } finally {
-        btn.innerText = "✨ AI Auto ဘာသာပြန် (စကားပြောအချိန်ကွက်တိ ထုတ်မည်)";
+        btn.innerText = "✨ AI Auto ဘာသာပြန် (စာသားထုတ်မည်)";
         btn.disabled = false;
       }
     }
@@ -1660,7 +1673,6 @@ HTML_UI = """<!DOCTYPE html>
       document.getElementById("cloneModal").classList.add("hidden");
     }
 
-    // PACKAGE & PAYMENT METHOD SELECTION
     function selectPackage(name, amount, pts, el) {
       state.selectedPlan = { name, amount, pts };
       document.querySelectorAll(".pkg-card").forEach(c => {
@@ -1688,13 +1700,8 @@ HTML_UI = """<!DOCTYPE html>
       el.classList.remove("border", "border-gray-800");
       el.classList.add("border-2", "border-sky-400");
 
-      if (method === "PromptPay") {
-        document.getElementById("payAccountTitle").innerText = "PromptPay (ထိုင်းဘတ်ဖြင့် လွှဲရန် - Kaung San Phyo)";
-        document.getElementById("payAccountNumber").innerText = "09409700002 (PromptPay / KPay)";
-      } else {
-        document.getElementById("payAccountTitle").innerText = `${method} အကောင့် (Kaung San Phyo)`;
-        document.getElementById("payAccountNumber").innerText = "09409700002";
-      }
+      document.getElementById("payAccountTitle").innerText = `${method} အကောင့် (Kaung San Phyo)`;
+      document.getElementById("payAccountNumber").innerText = "09409700002";
     }
 
     function copyPhone() { navigator.clipboard.writeText("09409700002"); alert("09409700002 (Kaung San Phyo) ကို Copy ကူးပြီးပါပြီ။"); }
@@ -1722,12 +1729,6 @@ HTML_UI = """<!DOCTYPE html>
         document.getElementById("receiptFile").value = "";
       }
     }
-
-    async function earnFreePoints() {
-      const fd = new FormData(); fd.append("user_id", userId);
-      const res = await fetch("/api/earn-ad", { method: "POST", body: fd });
-      if (res.ok) { alert("🎉 +5 Credits ရရှိပါပြီ!"); loadUser(); }
-    }
   </script>
 </body>
 </html>"""
@@ -1742,7 +1743,7 @@ async def api_user(user_id: int):
     return get_or_create_user(user_id)
 
 @app.get("/api/voice-sample/{voice_key}")
-async def api_voice_sample(voice_key: str, user_id: int = 1638781080, style: str = "storytelling"):
+async def api_voice_sample(voice_key: str, user_id: int = 1638781080, style: str = "movie_recap"):
     if voice_key == "cloned":
         user = get_or_create_user(user_id)
         if not user["cloned_voice_id"]:
@@ -1762,7 +1763,7 @@ async def api_voice_sample(voice_key: str, user_id: int = 1638781080, style: str
         g_cfg = GOOGLE_VOICES[voice_key]
         out_path = f"outputs/sample_{voice_key}.mp3"
         if not os.path.exists(out_path):
-            generate_google_gemini_tts(g_cfg["sample"], g_cfg["name"], "storytelling", out_path)
+            generate_google_gemini_tts(g_cfg["sample"], g_cfg["name"], "movie_recap", out_path)
         return {"audio_url": f"/{out_path}"}
 
     raise HTTPException(status_code=404, detail="Voice not found")
@@ -1772,7 +1773,7 @@ async def api_tts(
     user_id: int = Form(...),
     text: str = Form(...),
     voice_type: str = Form(...),
-    speaking_style: str = Form("storytelling"),
+    speaking_style: str = Form("movie_recap"),
     speed: float = Form(1.0)
 ):
     user = get_or_create_user(user_id)
@@ -1819,7 +1820,7 @@ async def api_clone_voice(user_id: int = Form(...), voice_name: str = Form(...),
     return {"status": "success", "voice_id": voice_id}
 
 @app.post("/api/auto-script")
-async def api_auto_script(video: UploadFile = File(...), pov_mode: str = Form("direct")):
+async def api_auto_script(video: UploadFile = File(...), pov_mode: str = Form("direct"), speaking_style: str = Form("movie_recap")):
     job_id = str(uuid.uuid4())[:8]
     in_vid = f"uploads/tmp_{job_id}_{video.filename}"
     in_aud = f"uploads/tmp_{job_id}.mp3"
@@ -1839,7 +1840,7 @@ async def api_auto_script(video: UploadFile = File(...), pov_mode: str = Form("d
         if res.returncode != 0 or not os.path.exists(in_aud):
             raise HTTPException(status_code=500, detail=f"Audio ခွဲထုတ်မရပါ: {res.stderr[-200:]}")
 
-        script = call_gemini_dialogue_sync(in_aud, vid_dur, pov_mode)
+        script = call_gemini_script_gen(in_aud, vid_dur, pov_mode, speaking_style)
         return {"script": script}
     except HTTPException as he:
         raise he
@@ -1851,7 +1852,7 @@ async def api_render_recap(
     user_id: int = Form(...),
     script_text: str = Form(...),
     voice_type: str = Form("auto_duo"),
-    speaking_style: str = Form("storytelling"),
+    speaking_style: str = Form("movie_recap"),
     speed: float = Form(1.0),
     mask_mode: str = Form("blur"),
     flip_h: str = Form("0"),
@@ -1996,11 +1997,6 @@ async def api_submit_payment(
                 parse_mode="Markdown"
             )
     return {"status": "submitted"}
-
-@app.post("/api/earn-ad")
-async def api_earn_ad(user_id: int = Form(...)):
-    update_points(user_id, 5)
-    return {"points": get_or_create_user(user_id)["points"]}
 
 @app.get("/outputs/{filename}")
 async def get_output(filename: str, download: int = 0):
