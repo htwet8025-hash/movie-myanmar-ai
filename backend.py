@@ -146,7 +146,7 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- FAST AUTO TRANSLATE (SUPPORTS BOTH AQ.Ab8... & AIza... KEYS) ---
+# --- FAST AUTO TRANSLATE (USES gemini-3.8-flash) ---
 def auto_transcribe_and_translate_fast(audio_path: str, duration_sec: float) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။")
@@ -172,7 +172,7 @@ def auto_transcribe_and_translate_fast(audio_path: str, duration_sec: float) -> 
     }
 
     last_err = ""
-    for model_name in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+    for model_name in ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.0-flash"]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
         res = requests.post(url, json=payload, timeout=60)
         if res.status_code == 200:
