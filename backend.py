@@ -1,14 +1,22 @@
 import os
+import sys
+import subprocess
+
+# --- AUTO-INSTALL PILLOW IF MISSING IN DOCKER ---
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow"])
+    from PIL import Image, ImageDraw, ImageFont
+
 import re
 import math
 import uuid
 import base64
 import sqlite3
 import asyncio
-import subprocess
 import requests
 import edge_tts
-from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
@@ -28,7 +36,7 @@ os.makedirs("outputs", exist_ok=True)
 os.makedirs("uploads", exist_ok=True)
 os.makedirs("fonts", exist_ok=True)
 
-# --- ENSURE REAL BURMESE FONT EXISTS FOR SUBTITLE RENDERING (NO MORE BOXES!) ---
+# --- ENSURE REAL BURMESE FONT EXISTS FOR SUBTITLE RENDERING ---
 BURMESE_FONT_PATH = "fonts/NotoSansMyanmar-Bold.ttf"
 def ensure_burmese_font():
     if not os.path.exists(BURMESE_FONT_PATH) or os.path.getsize(BURMESE_FONT_PATH) < 10000:
@@ -699,7 +707,7 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- BACKGROUND AUDIO / VOCAL REMOVAL MODE (SMOOTH & CLEAN) -->
+        <!-- BACKGROUND AUDIO / VOCAL REMOVAL MODE -->
         <div class="space-y-1.5">
           <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">🎧 မူရင်း Video အသံ စီမံခန့်ခွဲမှု</div>
           <div class="grid grid-cols-3 gap-1.5 text-center text-[11px]">
