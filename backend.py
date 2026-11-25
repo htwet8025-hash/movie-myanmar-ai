@@ -229,7 +229,7 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- FAST AUTO TRANSLATE ---
+# --- FAST AUTO TRANSLATE (USES gemini-3.5-flash-lite AS RECOMMENDED BY API) ---
 def call_gemini_audio(audio_path: str, duration_sec: float, pov_mode: str) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။")
@@ -262,7 +262,7 @@ def call_gemini_audio(audio_path: str, duration_sec: float, pov_mode: str) -> st
     }
 
     last_err = ""
-    for model_name in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
+    for model_name in ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.0-flash"]:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
             res = requests.post(url, json=payload, timeout=60)
@@ -480,7 +480,6 @@ HTML_UI = """<!DOCTYPE html>
             </div>
           </div>
 
-          <!-- UN-FLIPPED NORMAL VIDEO PROGRESS & PLAY/PAUSE BAR -->
           <div id="customVideoBar" class="hidden bg-[#12141e] px-3 py-2 flex items-center gap-2.5 border-t border-gray-800">
             <button type="button" onclick="togglePlayPreview()" id="playPauseBtn" class="w-7 h-7 rounded-full bg-teal-500 text-gray-950 font-extrabold text-xs flex items-center justify-center">▶</button>
             <input type="range" id="videoSeekSlider" min="0" max="100" value="0" oninput="seekPreviewVideo(this.value)" class="flex-1 accent-teal-400 h-1.5 bg-gray-700 rounded-lg cursor-pointer">
@@ -488,7 +487,6 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- Original Audio Option (Muted by default as requested) -->
         <div class="sub-card rounded-xl px-3 py-2.5 flex items-center justify-between text-xs">
           <span class="font-bold text-gray-200">🔇 မူရင်း Video အသံကို လုံးဝဖြတ်မည် (Mute)</span>
           <input type="checkbox" id="muteOriginalAudio" checked class="w-4 h-4 accent-teal-400" />
@@ -921,7 +919,6 @@ HTML_UI = """<!DOCTYPE html>
       }, 60);
     }
 
-    // CUSTOM VIDEO PLAYER CONTROLS (STAYS NORMAL EVEN WHEN VIDEO IS FLIPPED!)
     function togglePlayPreview() {
       const vid = document.getElementById("videoPreview");
       const btn = document.getElementById("playPauseBtn");
@@ -972,7 +969,6 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
-    // Draggable & Resizable Mask Box
     const container = document.getElementById("previewContainer");
     const maskBox = document.getElementById("maskBox");
     const resizeHandle = document.getElementById("resizeHandle");
@@ -1115,7 +1111,6 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
-    // WORKING HD DOWNLOAD BUTTON FOR TELEGRAM WEBVIEW & MOBILE BROWSER
     function downloadHdVideo() {
       if (!state.lastVideoUrl) return alert("Video မရှိသေးပါ။");
       const fullUrl = window.location.origin + state.lastVideoUrl + "?download=1";
@@ -1383,7 +1378,6 @@ async def api_render_recap(
 
         vf_str = ",".join(filters) if filters else "null"
 
-        # MUTE ORIGINAL AUDIO COMPLETELY WHEN mute_orig == "1" (Default)
         if mute_orig == "0" and vid_has_audio:
             filter_complex = f"[0:v]{vf_str}[v];[0:a]volume=0.08[bg];[1:a]volume=1.35[fg];[bg][fg]amix=inputs=2:duration=first[a]"
         else:
