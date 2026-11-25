@@ -1,10 +1,10 @@
 import os
 import uuid
+import wave
 import base64
 import sqlite3
 import asyncio
 import subprocess
-import traceback
 import requests
 import edge_tts
 from dotenv import load_dotenv
@@ -102,47 +102,103 @@ def has_audio_stream(file_path: str) -> bool:
     except Exception:
         return False
 
-# --- FREE BURMESE MALE VOICES (3 STYLES) ---
-FREE_VOICES = {
-    "maung_thiha": {
-        "voice": "my-MM-ThihaNeural",
-        "pitch": "+0Hz",
-        "rate": "+0%",
-        "sample": "မင်္ဂလာပါခင်ဗျာ။ ကျွန်တော်ကတော့ မောင်သီဟ ဖြစ်ပါတယ်။ ဇာတ်လမ်းအကျဉ်းချုပ်တွေကို နားထောင်လို့ကောင်းအောင် ပြောပြပေးပါမယ်။"
+# --- EDGE TTS (FREE) & SPEAKING STYLES ---
+EDGE_VOICES = {
+    "edge_nilar": {
+        "voice": "my-MM-NilarNeural",
+        "sample": "မင်္ဂလာပါရှင်။ ကျွန်မကတော့ နီလာ ဖြစ်ပါတယ်။ ဇာတ်လမ်းအကျဉ်းချုပ်တွေကို နားထောင်လို့ကောင်းအောင် ပြောပြပေးပါမယ်။"
     },
-    "ko_zaw": {
+    "edge_thiha": {
         "voice": "my-MM-ThihaNeural",
-        "pitch": "+4Hz",
-        "rate": "+10%",
-        "sample": "ဟုတ်ကဲ့ အခုဆိုရင် ပွဲချိန်စတင်နေပါပြီခင်ဗျာ။ ကျွန်တော် ကိုဇော် ကနေ သွက်သွက်လက်လက် တင်ဆက်ပေးသွားမှာပါ။"
-    },
-    "u_min": {
-        "voice": "my-MM-ThihaNeural",
-        "pitch": "-5Hz",
-        "rate": "-5%",
-        "sample": "လျှို့ဝှက်ဆန်းကြယ်တဲ့ ဒီဇာတ်လမ်းရဲ့ နောက်ကွယ်မှာ ဘာတွေရှိနေမလဲဆိုတာ ဦးမင်းနဲ့အတူ ကြည့်ရှုလိုက်ရအောင်။"
-    },
+        "sample": "မင်္ဂလာပါခင်ဗျာ။ ကျွန်တော်ကတော့ သီဟ ဖြစ်ပါတယ်။ ဇာတ်လမ်းအကျဉ်းချုပ်တွေကို စိတ်ဝင်စားစရာကောင်းအောင် ပြောပြပေးပါမယ်။"
+    }
 }
 
-async def generate_free_burmese_tts(text: str, style_key: str, speed_mult: float, out_path: str):
-    cfg = FREE_VOICES.get(style_key, FREE_VOICES["maung_thiha"])
-    base_rate = int(cfg["rate"].replace("%", ""))
+SPEAKING_STYLES = {
+    "storytelling": {"pitch": "+0Hz", "rate": "+2%"},
+    "thriller": {"pitch": "-6Hz", "rate": "-6%"},
+    "calm": {"pitch": "-2Hz", "rate": "-4%"},
+    "energetic": {"pitch": "+5Hz", "rate": "+12%"},
+    "original": {"pitch": "+0Hz", "rate": "+0%"},
+}
+
+async def generate_edge_tts(text: str, voice_key: str, style_key: str, speed_mult: float, out_path: str):
+    v_cfg = EDGE_VOICES.get(voice_key, EDGE_VOICES["edge_thiha"])
+    s_cfg = SPEAKING_STYLES.get(style_key, SPEAKING_STYLES["storytelling"])
+
+    base_rate = int(s_cfg["rate"].replace("%", ""))
     extra_rate = int((speed_mult - 1.0) * 100)
     total_rate = base_rate + extra_rate
     rate_str = f"{total_rate:+d}%"
 
     communicate = edge_tts.Communicate(
         text=text,
-        voice=cfg["voice"],
-        pitch=cfg["pitch"],
+        voice=v_cfg["voice"],
+        pitch=s_cfg["pitch"],
         rate=rate_str
     )
     await communicate.save(out_path)
 
-# --- VOICE CLONING (MP3/WAV + MP4 VIDEO) ---
+# --- GOOGLE GEMINI VOICES ---
+GOOGLE_VOICES = {
+    "google_Kore": {"name": "Kore", "sample": "မင်္ဂလာပါရှင်။ ကျွန်မကတော့ တည်ငြိမ်တဲ့ အသံပိုင်ရှင် Kore ဖြစ်ပါတယ်။"},
+    "google_Aoede": {"name": "Aoede", "sample": "မင်္ဂလာပါရှင်။ ပေါ့ပေါ့ပါးပါးနဲ့ နားထောင်လို့ကောင်းမယ့် Aoede အသံ ဖြစ်ပါတယ်။"},
+    "google_Leda": {"name": "Leda", "sample": "မင်္ဂလာပါရှင်။ နုပျိုလန်းဆန်းတဲ့ အသံပိုင်ရှင် Leda ဖြစ်ပါတယ်။"},
+    "google_Puck": {"name": "Puck", "sample": "မင်္ဂလာပါခင်ဗျာ။ တက်တက်ကြွကြွနဲ့ တင်ဆက်ပေးမယ့် Puck အသံ ဖြစ်ပါတယ်။"},
+    "google_Charon": {"name": "Charon", "sample": "မင်္ဂလာပါခင်ဗျာ။ လေးနက်တည်ကြည်တဲ့ အသံပိုင်ရှင် Charon ဖြစ်ပါတယ်။"},
+    "google_Fenrir": {"name": "Fenrir", "sample": "မင်္ဂလာပါခင်ဗျာ။ စိတ်လှုပ်ရှားစရာ ဇာတ်ဝင်ခန်းတွေကို ပြောပြပေးမယ့် Fenrir ဖြစ်ပါတယ်။"}
+}
+
+def generate_google_gemini_tts(text: str, google_voice_name: str, style_key: str, out_path: str):
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။ Free Edge အသံများကို သုံးနိုင်ပါသည်။")
+
+    style_desc = {
+        "storytelling": "engaging Burmese movie recap storytelling tone",
+        "thriller": "suspenseful, mysterious, dramatic thriller tone",
+        "calm": "calm, soothing, gentle tone",
+        "energetic": "energetic, fast-paced, lively commentary tone",
+        "original": "natural neutral Burmese speaking tone"
+    }.get(style_key, "natural Burmese storytelling tone")
+
+    prompt = f"Read the following Burmese text aloud in a {style_desc}. Speak clearly in Burmese:\n\n{text}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {"voiceName": google_voice_name}
+                }
+            }
+        }
+    }
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={GEMINI_API_KEY}"
+    res = requests.post(url, json=payload, timeout=60)
+    if res.status_code != 200:
+        raise HTTPException(status_code=500, detail=f"Google Voice Error ({res.status_code}): {res.text[:200]}")
+
+    data = res.json()
+    try:
+        b64_audio = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        pcm_bytes = base64.b64decode(b64_audio)
+        tmp_wav = out_path + ".wav"
+        with wave.open(tmp_wav, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(24000)
+            wf.writeframes(pcm_bytes)
+        subprocess.run(["ffmpeg", "-y", "-i", tmp_wav, "-acodec", "libmp3lame", out_path], check=True)
+        if os.path.exists(tmp_wav):
+            os.remove(tmp_wav)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Google Audio Decode Error: {str(e)}")
+
+# --- VOICE CLONING ---
 def clone_voice_elevenlabs(user_id: int, voice_name: str, file_path: str):
     if not ELEVENLABS_API_KEY:
-        raise HTTPException(status_code=400, detail="ELEVENLABS_API_KEY မထည့်ရသေးပါ။ Free အသံ ၃ မျိုးကို အသုံးပြုနိုင်ပါသည်။")
+        raise HTTPException(status_code=400, detail="ELEVENLABS_API_KEY မထည့်ရသေးပါ။")
     url = "https://api.elevenlabs.io/v1/voices/add"
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
     data = {"name": f"MMA_{user_id}_{voice_name}"}
@@ -169,12 +225,12 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
     }
     res = requests.post(url, headers=headers, json=payload)
     if res.status_code != 200:
-        raise HTTPException(status_code=400, detail="Cloned Voice အသံထုတ်မရပါ။ Free အသံ ၃ မျိုးကို ပြောင်းသုံးပါ။")
+        raise HTTPException(status_code=400, detail="Cloned Voice အသံထုတ်မရပါ။ Free အသံများကို ပြောင်းသုံးပါ။")
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- FAST AUTO TRANSLATE (SAFE & SUPPORTS ALL GEMINI MODELS) ---
-def call_gemini_audio(audio_path: str, duration_sec: float) -> str:
+# --- FAST AUTO TRANSLATE ---
+def call_gemini_audio(audio_path: str, duration_sec: float, pov_mode: str) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။")
 
@@ -182,11 +238,18 @@ def call_gemini_audio(audio_path: str, duration_sec: float) -> str:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
 
     target_chars = max(40, int(duration_sec * 16)) if duration_sec > 0 else 250
+
+    pov_instruction = {
+        "direct": "Translate the dialogue/speech directly into natural spoken Burmese without changing the original POV or meaning.",
+        "third": "Narrate the events in Third-Person Burmese movie-recap storytelling style (ပြင်ပဇာတ်ကြောင်းပြောသူအနေနဲ့ ဖြစ်စဉ်ကို ပြောပြပါ).",
+        "first": "Narrate the events in First-Person Burmese POV as if the main character is telling their own story (အဓိကဇာတ်ကောင် ကိုယ်တိုင်ပြောသလို ပြောပြပါ)."
+    }.get(pov_mode, "Narrate in natural spoken Burmese movie-recap style.")
+
     prompt = (
         f"Listen to this audio (duration: {duration_sec:.1f} seconds). "
-        f"Translate and narrate what is happening into natural spoken Burmese movie-recap style. "
+        f"{pov_instruction} "
         f"Keep the Burmese script length around {target_chars} characters so when read aloud it finishes in about {duration_sec:.1f} seconds. "
-        f"Output ONLY the Burmese narration text without any English, timestamps, or explanations."
+        f"Output ONLY the Burmese text without any English, timestamps, or explanations."
     )
 
     payload = {
@@ -199,7 +262,7 @@ def call_gemini_audio(audio_path: str, duration_sec: float) -> str:
     }
 
     last_err = ""
-    for model_name in ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-3.5-flash"]:
+    for model_name in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
             res = requests.post(url, json=payload, timeout=60)
@@ -226,8 +289,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"မင်္ဂလာပါ {user.first_name} 👋\n\n"
         f"**Movie Myanmar Ai** မှ ကြိုဆိုပါတယ်။\n"
-        f"• စာသားမှ မြန်မာအသံပြောင်းခြင်း (Free အသံ ၃ မျိုး + Voice Clone)\n"
-        f"• နိုင်ငံခြား Video များကို မြန်မာအသံ Recap ပြောင်းခြင်း\n\n"
         f"စတင်အသုံးပြုရန် အောက်ပါခလုတ်ကို နှိပ်ပါ 👇",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
@@ -367,7 +428,7 @@ HTML_UI = """<!DOCTYPE html>
         <div>
           <h3 class="font-bold text-base text-white flex items-center gap-1.5">🎬 Video ➔ မြန်မာအသံ</h3>
           <p class="text-xs text-gray-400 mt-1 leading-relaxed">
-            English · 中文 · 한국어 · ไทย စတဲ့ ဘာသာစကားမျိုးစုံ video ကို တင်လိုက်ရုံနဲ့ AI က နားထောင်ပြီး မြန်မာလို ဘာသာပြန်၊ မူရင်း Video ကြာချိန်အတိုင်း အချိန်ကွက်တိ အသံထုတ်ပေးပါတယ်။
+            English · 中文 · 한국어 · ไทย စတဲ့ ဘာသာစကားမျိုးစုံ video ကို တင်လိုက်ရုံနဲ့ မူရင်းအသံကို ဖြတ်တောက်ပြီး မြန်မာအသံသီးသန့် အချိန်ကွက်တိ ပြောင်းပေးပါတယ်။
           </p>
         </div>
 
@@ -392,31 +453,45 @@ HTML_UI = """<!DOCTYPE html>
           🖼️ မူရင်း video ထဲက စာသား/logo ကို ဖုံးချင်ရင် ပုံပေါ်မှာ box ဆွဲပါ (သို့မဟုတ် Video ဘယ်/ညာ လှန်ပါ)
         </div>
 
-        <!-- 3 BUTTONS: ဖုံးမထားဘူး | Blur | ဘယ်/ညာလှန် -->
         <div class="grid grid-cols-3 gap-2">
           <button onclick="setMaskMode('none')" id="mask-none" class="py-2.5 rounded-xl bg-[#1e2030] border border-gray-700 text-xs font-bold text-gray-300">ဖုံးမထားဘူး</button>
           <button onclick="setMaskMode('blur')" id="mask-blur" class="py-2.5 rounded-xl grad-pill text-xs font-extrabold">🌫️ Blur</button>
           <button onclick="toggleFlipVideo()" id="btn-flip" class="py-2.5 rounded-xl bg-[#1e2030] border border-gray-700 text-xs font-bold text-gray-300">🔄 ဘယ်/ညာလှန်</button>
         </div>
 
-        <!-- INTERACTIVE VIDEO PREVIEW -->
-        <div id="previewContainer" class="relative w-full rounded-2xl overflow-hidden bg-black border border-gray-800 min-h-[230px] flex items-center justify-center">
-          <video id="videoPreview" class="w-full max-h-[360px] object-contain hidden transition-transform duration-200" playsinline controls></video>
-          <div id="emptyVideoPlaceholder" class="text-center p-6 space-y-1">
-            <p class="text-2xl">🎞️</p>
-            <p class="text-xs text-gray-400">အပေါ်မှ Video ရွေးလိုက်ပါက ဤနေရာတွင် Video ပေါ်လာပြီး Blur အကွက်ကို လက်ဖြင့် ဆွဲရွှေ့နိုင်သလို ဘယ်/ညာ လှန်နိုင်ပါမည်</p>
+        <!-- INTERACTIVE VIDEO PREVIEW (CUSTOM CONTROLS SO FLIP NEVER REVERSES PROGRESS BAR!) -->
+        <div class="rounded-2xl overflow-hidden bg-black border border-gray-800">
+          <div id="previewContainer" class="relative w-full min-h-[230px] flex items-center justify-center overflow-hidden">
+            <video id="videoPreview" class="w-full max-h-[360px] object-contain hidden transition-transform duration-200" playsinline ontimeupdate="updateCustomSeek()"></video>
+            <div id="emptyVideoPlaceholder" class="text-center p-6 space-y-1">
+              <p class="text-2xl">🎞️</p>
+              <p class="text-xs text-gray-400">အပေါ်မှ Video ရွေးလိုက်ပါက ဤနေရာတွင် Video ပေါ်လာပြီး Blur အကွက်ကို လက်ဖြင့် ဆွဲရွှေ့နိုင်သလို ဘယ်/ညာ လှန်နိုင်ပါမည်</p>
+            </div>
+
+            <div id="maskBox" style="top: 62%; left: 10%; width: 80%; height: 14%;"
+                 class="absolute border-2 border-teal-400 bg-white/15 backdrop-blur-md cursor-move flex items-center justify-center touch-none">
+              <span class="text-[10px] font-bold text-white bg-black/50 px-1.5 py-0.5 rounded pointer-events-none">Blur Box</span>
+              <div id="resizeHandle" class="absolute -bottom-2.5 -right-2.5 w-6 h-6 rounded-full bg-teal-400 border-2 border-gray-900 shadow-lg cursor-nwse-resize"></div>
+            </div>
+
+            <div id="subPosPill" style="bottom: 10%;"
+                 class="absolute left-1/2 -translate-x-1/2 bg-amber-400 text-gray-950 font-extrabold text-[11px] px-3 py-1 rounded-full shadow-lg cursor-ns-resize whitespace-nowrap touch-none">
+              📝 စာတန်း — ဆွဲရွှေ့ပါ
+            </div>
           </div>
 
-          <div id="maskBox" style="top: 62%; left: 10%; width: 80%; height: 14%;"
-               class="absolute border-2 border-teal-400 bg-white/15 backdrop-blur-md cursor-move flex items-center justify-center touch-none">
-            <span class="text-[10px] font-bold text-white bg-black/50 px-1.5 py-0.5 rounded pointer-events-none">Blur Box</span>
-            <div id="resizeHandle" class="absolute -bottom-2.5 -right-2.5 w-6 h-6 rounded-full bg-teal-400 border-2 border-gray-900 shadow-lg cursor-nwse-resize"></div>
+          <!-- UN-FLIPPED NORMAL VIDEO PROGRESS & PLAY/PAUSE BAR -->
+          <div id="customVideoBar" class="hidden bg-[#12141e] px-3 py-2 flex items-center gap-2.5 border-t border-gray-800">
+            <button type="button" onclick="togglePlayPreview()" id="playPauseBtn" class="w-7 h-7 rounded-full bg-teal-500 text-gray-950 font-extrabold text-xs flex items-center justify-center">▶</button>
+            <input type="range" id="videoSeekSlider" min="0" max="100" value="0" oninput="seekPreviewVideo(this.value)" class="flex-1 accent-teal-400 h-1.5 bg-gray-700 rounded-lg cursor-pointer">
+            <span id="videoTimeText" class="text-[11px] font-mono text-gray-300">0:00 / 0:00</span>
           </div>
+        </div>
 
-          <div id="subPosPill" style="bottom: 10%;"
-               class="absolute left-1/2 -translate-x-1/2 bg-amber-400 text-gray-950 font-extrabold text-[11px] px-3 py-1 rounded-full shadow-lg cursor-ns-resize whitespace-nowrap touch-none">
-            📝 စာတန်း — ဆွဲရွှေ့ပါ
-          </div>
+        <!-- Original Audio Option (Muted by default as requested) -->
+        <div class="sub-card rounded-xl px-3 py-2.5 flex items-center justify-between text-xs">
+          <span class="font-bold text-gray-200">🔇 မူရင်း Video အသံကို လုံးဝဖြတ်မည် (Mute)</span>
+          <input type="checkbox" id="muteOriginalAudio" checked class="w-4 h-4 accent-teal-400" />
         </div>
 
         <!-- Subtitle Size -->
@@ -433,28 +508,6 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- Line Spacing -->
-        <div class="space-y-2">
-          <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">
-            ↕️ စာ ၂ ကြောင်းကြား အကွာ <span id="lineGapLabel" class="text-teal-400">ပုံမှန်</span>
-          </div>
-          <div class="grid grid-cols-5 gap-1.5 text-center">
-            <button onclick="setLineGap('ကျပ်', 1.1, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">ကျပ်<br><span class="text-[10px] text-gray-500">0.65x</span></button>
-            <button onclick="setLineGap('0.8x', 1.25, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">0.8x</button>
-            <button onclick="setLineGap('ပုံမှန်', 1.5, this)" class="gap-btn py-2 rounded-xl grad-pill text-[11px]">ပုံမှန်</button>
-            <button onclick="setLineGap('1.2x', 1.75, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">1.2x</button>
-            <button onclick="setLineGap('ကျယ်', 2.0, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">ကျယ်<br><span class="text-[10px] text-gray-500">1.4x</span></button>
-          </div>
-        </div>
-
-        <!-- LIVE SUBTITLE PREVIEW BOX -->
-        <div class="bg-[#111522] border border-gray-800 rounded-2xl p-4 text-center space-y-2">
-          <p id="liveSubSample" style="font-size: 17px; line-height: 1.5;" class="font-bold text-white">
-            ဒီနေ့ ကြည့်ရမယ့် <span id="sampleHighlight" class="text-amber-400">ဇာတ်လမ်းလေးက</span><br>တကယ် ကောင်းပါတယ်နော်
-          </p>
-          <p class="text-[11px] text-gray-500">↑ ထွက်လာမယ့် စာတန်း ပုံစံ နမူနာ</p>
-        </div>
-
         <!-- Aspect Ratio -->
         <div class="space-y-2">
           <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">📐 Video အချိုးအစား (ratio)</div>
@@ -466,81 +519,32 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- Resolution -->
-        <div class="space-y-2">
-          <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">🎞️ Resolution (ကြည်လင်ပြတ်သားမှု)</div>
-          <div class="grid grid-cols-5 gap-1.5 text-center">
-            <button onclick="setRes('original', this)" class="res-btn py-2 rounded-xl grad-pill text-[11px]">မူရင်း</button>
-            <button onclick="setRes('360p', this)" class="res-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">360p</button>
-            <button onclick="setRes('480p', this)" class="res-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">480p</button>
-            <button onclick="setRes('720p', this)" class="res-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">720p</button>
-            <button onclick="setRes('1080p', this)" class="res-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">1080p</button>
-          </div>
-        </div>
+        <!-- STEP 1: NARRATION POV STYLE -->
+        <div class="space-y-2 pt-2 border-t border-gray-800">
+          <div class="text-xs font-extrabold text-amber-400 tracking-wide">① မြန်မာဘာသာပြန် SCRIPT</div>
+          <div class="text-xs font-bold text-gray-300">ဇာတ်ကြောင်းပုံစံ</div>
 
-        <!-- Subtitle Toggle -->
-        <div class="space-y-2">
-          <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">📝 စာတန်း (subtitle) ထိုးမလား?</div>
-          <div class="grid grid-cols-2 gap-2">
-            <button onclick="setSubEnabled(true, this)" class="suben-btn py-2.5 rounded-xl grad-pill text-xs">✅ စာတန်းထိုးမယ်</button>
-            <button onclick="setSubEnabled(false, this)" class="suben-btn py-2.5 rounded-xl bg-[#1e2030] border border-gray-800 text-xs text-gray-300">🚫 မထိုးဘူး (ပိုမြန်တယ်)</button>
-          </div>
-        </div>
+          <div class="space-y-2">
+            <div onclick="selectPov('direct', this)" class="pov-card p-3.5 rounded-2xl bg-[#1e2030] border border-gray-800 cursor-pointer">
+              <div class="font-bold text-sm text-white">Direct Translation</div>
+              <div class="text-xs text-gray-400 mt-1">မူရင်း POV နှင့် အဓိပ္ပာယ်ကို မပြောင်းဘဲ ဘာသာပြန်မယ်</div>
+            </div>
 
-        <!-- Font Style -->
-        <div class="space-y-2">
-          <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">🔤 စာတန်း ဖောင့် စတိုင်</div>
-          <div class="grid grid-cols-3 gap-2 text-center">
-            <button onclick="setFontStyle('sans', this)" class="font-btn py-2.5 rounded-xl grad-pill text-xs">မြန်မာ<br>ရိုးရိုး</button>
-            <button onclick="setFontStyle('padauk', this)" class="font-btn py-2.5 rounded-xl bg-[#1e2030] border border-gray-800 text-xs text-gray-300">မြန်မာ<br><span class="text-[10px] text-gray-400">Padauk</span></button>
-            <button onclick="setFontStyle('serif', this)" class="font-btn py-2.5 rounded-xl bg-[#1e2030] border border-gray-800 text-xs text-gray-300 font-serif">မြန်မာ<br><span class="text-[10px] text-gray-400">Serif</span></button>
-          </div>
-        </div>
+            <div onclick="selectPov('third', this)" class="pov-card p-3.5 rounded-2xl bg-[#1e2030] border border-gray-800 cursor-pointer">
+              <div class="font-bold text-sm text-white">Third Person</div>
+              <div class="text-xs text-gray-400 mt-1">ပြင်ပဇာတ်ကြောင်းပြောသူအနေနဲ့ ဖြစ်စဉ်ကို ပြောမယ်</div>
+            </div>
 
-        <!-- Color Presets -->
-        <div class="space-y-2">
-          <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">🎨 စာတန်း အရောင်စတိုင် — ပြောနေတဲ့ စကားလုံးက အရောင်ပြောင်းသွားမယ်</div>
-          <div class="grid grid-cols-2 gap-2 text-center text-xs">
-            <button onclick="setColorPreset('text-amber-400', this)" class="preset-btn p-2.5 rounded-xl bg-[#1e2030] border-2 border-purple-500">
-              <div class="font-bold">ဒီနေ့ <span class="text-amber-400">စာတန်း</span> ပေါ်မယ်</div>
-              <div class="text-[10px] text-gray-400 mt-0.5">Clean</div>
-            </button>
-            <button onclick="setColorPreset('bg-blue-600 text-white px-1 rounded', this)" class="preset-btn p-2.5 rounded-xl bg-[#1e2030] border border-gray-800">
-              <div class="font-bold">ဒီနေ့ <span class="bg-blue-600 px-1 rounded">စာတန်း</span> ပေါ်မယ်</div>
-              <div class="text-[10px] text-gray-400 mt-0.5">Bold Pop</div>
-            </button>
-            <button onclick="setColorPreset('text-emerald-400 drop-shadow-[0_0_6px_rgba(52,211,153,0.8)]', this)" class="preset-btn p-2.5 rounded-xl bg-[#1e2030] border border-gray-800">
-              <div class="font-bold">ဒီနေ့ <span class="text-emerald-400">စာတန်း</span> ပေါ်မယ်</div>
-              <div class="text-[10px] text-gray-400 mt-0.5">Soft Glow</div>
-            </button>
-            <button onclick="setColorPreset('bg-black/80 text-amber-300 px-1.5 rounded', this)" class="preset-btn p-2.5 rounded-xl bg-[#1e2030] border border-gray-800">
-              <div class="font-bold">ဒီနေ့ <span class="bg-black text-amber-300 px-1 rounded">စာတန်း</span> ပေါ်မယ်</div>
-              <div class="text-[10px] text-gray-400 mt-0.5">Box</div>
-            </button>
-            <button onclick="setColorPreset('bg-red-600 text-white px-1 rounded', this)" class="preset-btn p-2.5 rounded-xl bg-[#1e2030] border border-gray-800">
-              <div class="font-bold">ဒီနေ့ <span class="bg-red-600 px-1 rounded">စာတန်း</span> ပေါ်မယ်</div>
-              <div class="text-[10px] text-gray-400 mt-0.5">Punch</div>
-            </button>
-            <button onclick="setColorPreset('text-sky-300', this)" class="preset-btn p-2.5 rounded-xl bg-[#1e2030] border border-gray-800">
-              <div class="font-bold">ဒီနေ့ <span class="text-sky-300">စာတန်း</span> ပေါ်မယ်</div>
-              <div class="text-[10px] text-gray-400 mt-0.5">Calm</div>
-            </button>
-            <button onclick="setColorPreset('text-yellow-300', this)" class="preset-btn p-2.5 rounded-xl bg-[#1e2030] border border-gray-800">
-              <div class="font-bold">ဒီနေ့ <span class="text-yellow-300">စာတန်း</span> ပေါ်မယ်</div>
-              <div class="text-[10px] text-gray-400 mt-0.5">Sunny</div>
-            </button>
-            <button onclick="setColorPreset('bg-pink-600 text-white px-1 rounded', this)" class="preset-btn p-2.5 rounded-xl bg-[#1e2030] border border-gray-800">
-              <div class="font-bold">ဒီနေ့ <span class="bg-pink-600 px-1 rounded">စာတန်း</span> ပေါ်မယ်</div>
-              <div class="text-[10px] text-gray-400 mt-0.5">Candy</div>
-            </button>
+            <div onclick="selectPov('first', this)" class="pov-card p-3.5 rounded-2xl grad-pill cursor-pointer shadow-lg">
+              <div class="font-extrabold text-sm text-gray-950">First Person</div>
+              <div class="text-xs text-gray-900 font-semibold mt-1">အဓိကဇာတ်ကောင် ကိုယ်တိုင်ပြောသလို ပြောမယ်</div>
+            </div>
           </div>
-        </div>
 
-        <!-- FULL-WIDTH AI BUTTON ON TOP + LABEL BELOW -->
-        <div class="space-y-2 pt-2">
-          <button onclick="autoTranslateVideo()" id="autoTransBtn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 font-extrabold text-sm text-white shadow-lg flex items-center justify-center gap-2 active:scale-98">
+          <button onclick="autoTranslateVideo()" id="autoTransBtn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 font-extrabold text-sm text-white shadow-lg flex items-center justify-center gap-2 active:scale-98 mt-2">
             ✨ AI Auto ဘာသာပြန် (အမြန်စာသားထုတ်မည်)
           </button>
+
           <div class="text-xs font-bold text-amber-300 pt-1">
             ✏️ မြန်မာစာတန်းတွေကို ကြိုက်သလို ပြင်ပါ
           </div>
@@ -557,51 +561,86 @@ HTML_UI = """<!DOCTYPE html>
       <audio id="ttsOnlyAudio" controls class="w-full hidden"></audio>
     </div>
 
-    <!-- VOICE SELECTION CARDS (WITH WORKING SAMPLE PREVIEW PLAY BUTTONS) -->
+    <!-- VOICEOVER SELECTION -->
     <div class="card-dark rounded-2xl p-4 space-y-3">
-      <div class="flex justify-between items-start">
-        <div>
-          <h3 class="font-bold text-base text-white">🗣️ Voice</h3>
-          <p class="text-[11px] text-gray-400 mt-0.5">အသံရွေးပါ (▶ နှိပ်ပြီး အသံအစမ်း နားထောင်ကြည့်နိုင်ပါတယ်)</p>
-        </div>
+      <div class="flex justify-between items-center">
+        <div class="text-xs font-extrabold text-amber-400 tracking-wide">② VOICEOVER အသံ</div>
         <button onclick="document.getElementById('cloneModal').classList.remove('hidden')" class="text-[11px] bg-purple-600/30 border border-purple-400/50 text-purple-200 px-2.5 py-1.5 rounded-xl font-bold">
-          + Voice Clone
+          + Voice Clone (MP3/MP4)
         </button>
       </div>
 
       <audio id="samplePreviewPlayer" class="hidden"></audio>
 
-      <div class="grid grid-cols-2 gap-2 text-xs">
-        <div onclick="selectVoice('maung_thiha', this)" class="voice-card p-3 rounded-xl bg-[#1e2030] border-2 border-purple-500 flex items-center justify-between cursor-pointer">
-          <div>
-            <div class="font-bold text-white">📖 ပုံပြင်ပြောသူ</div>
-            <div class="text-[10px] text-emerald-400">မောင်သီဟ · Free</div>
-          </div>
-          <button type="button" onclick="playVoiceSample(event, 'maung_thiha', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-teal-500 hover:text-black flex items-center justify-center text-xs font-bold shadow">▶</button>
+      <div class="text-[11px] font-bold text-gray-400">Edge အသံ — အခမဲ့</div>
+      <div class="space-y-2 text-xs">
+        <div onclick="selectVoice('edge_nilar', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border-2 border-amber-400 flex items-center justify-between cursor-pointer">
+          <span class="font-bold text-white">Nilar - မိန်းကလေး</span>
+          <button type="button" onclick="playVoiceSample(event, 'edge_nilar', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
         </div>
 
-        <div onclick="selectVoice('ko_zaw', this)" class="voice-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <div>
-            <div class="font-bold text-white">⚽ ဘောလုံး/ဝေဖန်သူ</div>
-            <div class="text-[10px] text-emerald-400">ကိုဇော် · Free</div>
-          </div>
-          <button type="button" onclick="playVoiceSample(event, 'ko_zaw', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-teal-500 hover:text-black flex items-center justify-center text-xs font-bold shadow">▶</button>
+        <div onclick="selectVoice('edge_thiha', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
+          <span class="font-bold text-white">Thiha - ယောက်ျားလေး</span>
+          <button type="button" onclick="playVoiceSample(event, 'edge_thiha', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
         </div>
+      </div>
 
-        <div onclick="selectVoice('u_min', this)" class="voice-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <div>
-            <div class="font-bold text-white">🎬 ဇာတ်လမ်းပြောသူ</div>
-            <div class="text-[10px] text-emerald-400">ဦးမင်း · Free</div>
-          </div>
-          <button type="button" onclick="playVoiceSample(event, 'u_min', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-teal-500 hover:text-black flex items-center justify-center text-xs font-bold shadow">▶</button>
+      <div class="text-[11px] font-bold text-gray-400 pt-1">Google အသံ — Premium Voices</div>
+      <div class="space-y-2 text-xs">
+        <div onclick="selectVoice('google_Kore', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
+          <span class="font-bold text-white">Kore - မိန်းကလေး (တည်ငြိမ်)</span>
+          <button type="button" onclick="playVoiceSample(event, 'google_Kore', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
         </div>
+        <div onclick="selectVoice('google_Aoede', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
+          <span class="font-bold text-white">Aoede - မိန်းကလေး (ပေါ့ပါး)</span>
+          <button type="button" onclick="playVoiceSample(event, 'google_Aoede', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
+        </div>
+        <div onclick="selectVoice('google_Leda', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
+          <span class="font-bold text-white">Leda - မိန်းကလေး (နုပျို)</span>
+          <button type="button" onclick="playVoiceSample(event, 'google_Leda', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
+        </div>
+        <div onclick="selectVoice('google_Puck', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
+          <span class="font-bold text-white">Puck - ယောက်ျားလေး (တက်ကြွ)</span>
+          <button type="button" onclick="playVoiceSample(event, 'google_Puck', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
+        </div>
+        <div onclick="selectVoice('google_Charon', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
+          <span class="font-bold text-white">Charon - ယောက်ျားလေး (လေးနက်)</span>
+          <button type="button" onclick="playVoiceSample(event, 'google_Charon', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
+        </div>
+        <div onclick="selectVoice('google_Fenrir', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
+          <span class="font-bold text-white">Fenrir - ယောက်ျားလေး (စိတ်လှုပ်ရှား)</span>
+          <button type="button" onclick="playVoiceSample(event, 'google_Fenrir', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
+        </div>
+        <div onclick="selectVoice('cloned', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
+          <span class="font-bold text-amber-300">⭐ My Cloned Voice (အသံတူပွား)</span>
+          <button type="button" onclick="playVoiceSample(event, 'cloned', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
+        </div>
+      </div>
 
-        <div onclick="selectVoice('cloned', this)" class="voice-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <div>
-            <div class="font-bold text-amber-300">⭐ အသံတူပွား</div>
-            <div class="text-[10px] text-gray-400">My Cloned Voice</div>
+      <!-- SPEAKING STYLE -->
+      <div class="pt-2 border-t border-gray-800 space-y-2">
+        <div class="text-xs font-extrabold text-amber-400">🎙️ ပြောဟန် (Thiha / Nilar)</div>
+        <div class="grid grid-cols-2 gap-2 text-xs">
+          <div onclick="selectStyle('storytelling', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border-2 border-amber-400 cursor-pointer">
+            <div class="font-bold text-amber-300">ပုံပြင်/ဇာတ်ကြောင်းပြော</div>
+            <div class="text-[10px] text-gray-300 mt-0.5">သဘာဝကျကျ ပြောဟန်</div>
           </div>
-          <button type="button" onclick="playVoiceSample(event, 'cloned', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold shadow">▶</button>
+          <div onclick="selectStyle('thriller', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 cursor-pointer">
+            <div class="font-bold text-white">သည်းထိတ်ရင်ဖို</div>
+            <div class="text-[10px] text-gray-400 mt-0.5">အာရုံစူးစိုက် ပြောဟန်</div>
+          </div>
+          <div onclick="selectStyle('calm', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 cursor-pointer">
+            <div class="font-bold text-white">တည်ငြိမ်</div>
+            <div class="text-[10px] text-gray-400 mt-0.5">အေးဆေးတည်ငြိမ် ပြောဟန်</div>
+          </div>
+          <div onclick="selectStyle('energetic', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 cursor-pointer">
+            <div class="font-bold text-white">တက်ကြွ</div>
+            <div class="text-[10px] text-gray-400 mt-0.5">မြန်မြန် အားပါပါ</div>
+          </div>
+          <div onclick="selectStyle('original', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 cursor-pointer col-span-2">
+            <div class="font-bold text-white">မူလအတိုင်း</div>
+            <div class="text-[10px] text-gray-400 mt-0.5">အပြင်အဆင်မပါ မူရင်းအသံ</div>
+          </div>
         </div>
       </div>
 
@@ -621,7 +660,7 @@ HTML_UI = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- MAIN RENDER BUTTON + 1% TO 100% PROGRESS BAR + RESULT CARD -->
+    <!-- MAIN RENDER BUTTON + PROGRESS + DOWNLOAD -->
     <div id="renderSection" class="space-y-3">
       <button onclick="startRecapRender()" id="mainRenderBtn" class="w-full py-4 rounded-2xl grad-btn text-base shadow-xl flex items-center justify-center gap-2 active:scale-98">
         🎬 Recap Video ထုတ်မယ်
@@ -639,10 +678,10 @@ HTML_UI = """<!DOCTYPE html>
 
         <div id="renderDoneActions" class="hidden space-y-2.5 pt-1">
           <p class="text-xs font-bold text-emerald-400">✅ ပြီးပါပြီ — အောက်က ခလုတ်ကို နှိပ်ပါ</p>
-          <a id="hdDownloadLink" href="#" download class="block w-full py-3.5 rounded-xl grad-btn text-center text-sm">
+          <button type="button" onclick="downloadHdVideo()" class="w-full py-3.5 rounded-xl grad-btn text-center text-sm shadow-lg active:scale-98">
             ⬇️ HD ဖိုင် (အရည်အသွေးအပြည့်) ယူမယ်
-          </a>
-          <button onclick="sendVideoToChat()" id="sendChatBtn" class="w-full py-3.5 rounded-xl bg-[#222538] border border-gray-700 font-bold text-sm text-white">
+          </button>
+          <button type="button" onclick="sendVideoToChat()" id="sendChatBtn" class="w-full py-3.5 rounded-xl bg-[#222538] border border-gray-700 font-bold text-sm text-white active:scale-98">
             📤 Telegram chat ထဲ ပို့မယ်
           </button>
         </div>
@@ -699,16 +738,16 @@ HTML_UI = """<!DOCTYPE html>
     <div class="card-dark p-5 rounded-2xl text-center space-y-3">
       <div class="text-3xl">🎁</div>
       <h2 class="font-bold text-base">အခမဲ့ Point စုဆောင်းပါ</h2>
-      <p class="text-xs text-gray-400">ကြော်ငြာကြည့်ပြီး Point များ အခမဲ့ ရယူနိုင်သလို Free မြန်မာအသံ ၃ မျိုးကို အမြဲ အခမဲ့ သုံးနိုင်ပါသည်။</p>
+      <p class="text-xs text-gray-400">ကြော်ငြာကြည့်ပြီး Point များ အခမဲ့ ရယူနိုင်သလို Free Edge အသံများကို အမြဲ အခမဲ့ သုံးနိုင်ပါသည်။</p>
       <button onclick="earnFreePoints()" class="w-full py-3 rounded-xl grad-btn text-sm">📺 ကြော်ငြာကြည့်ပြီး +5 Points ယူမည်</button>
     </div>
   </div>
 
-  <!-- VOICE CLONE MODAL (MP3/WAV + MP4 VIDEO) -->
+  <!-- VOICE CLONE MODAL -->
   <div id="cloneModal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
     <div class="card-dark w-full max-w-sm p-5 rounded-2xl space-y-3">
       <h3 class="font-bold text-sm text-purple-300">🎙️ အသံတူပွား ဖန်တီးရန် (Voice Cloning)</h3>
-      <p class="text-xs text-gray-400">ဆူညံသံမပါသော ၅ စက္ကန့်မှ ၁၅ စက္ကန့်အတွင်း အသံဖိုင် (MP3/WAV) သို့မဟုတ် Video ဖိုင် (MP4) တင်ပေးပါ။</p>
+      <p class="text-xs text-gray-400">၅ စက္ကန့်မှ ၁၅ စက္ကန့်အတွင်း အသံဖိုင် (MP3/WAV) သို့မဟုတ် Video ဖိုင် (MP4) တင်ပေးပါ။</p>
       <input type="text" id="cloneName" placeholder="အသံအမည် (ဥပမာ- My Voice)" class="w-full bg-[#10121b] border border-gray-800 rounded-xl p-2.5 text-xs text-white" />
       <input type="file" id="cloneSample" accept="audio/*,video/*" class="w-full text-xs bg-[#10121b] border border-gray-800 rounded-xl p-2" />
       <div class="flex gap-2 pt-2">
@@ -745,13 +784,13 @@ HTML_UI = """<!DOCTYPE html>
     });
 
     let state = {
-      voice: "maung_thiha",
+      povMode: "first",
+      voice: "edge_nilar",
+      speakingStyle: "storytelling",
       speed: 1.0,
       maskMode: "blur",
       flipH: false,
       ratio: "original",
-      res: "original",
-      subEnabled: true,
       lastVideoUrl: "",
       selectedPlan: {}
     };
@@ -793,10 +832,71 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
+    function selectPov(mode, el) {
+      state.povMode = mode;
+      document.querySelectorAll(".pov-card").forEach(c => {
+        c.className = "pov-card p-3.5 rounded-2xl bg-[#1e2030] border border-gray-800 cursor-pointer";
+        c.children[0].className = "font-bold text-sm text-white";
+        c.children[1].className = "text-xs text-gray-400 mt-1";
+      });
+      el.className = "pov-card p-3.5 rounded-2xl grad-pill cursor-pointer shadow-lg";
+      el.children[0].className = "font-extrabold text-sm text-gray-950";
+      el.children[1].className = "text-xs text-gray-900 font-semibold mt-1";
+    }
+
+    function selectVoice(v, el) {
+      state.voice = v;
+      document.querySelectorAll(".voice-row").forEach(c => {
+        c.classList.remove("border-2", "border-amber-400");
+        c.classList.add("border", "border-gray-800");
+      });
+      el.classList.remove("border", "border-gray-800");
+      el.classList.add("border-2", "border-amber-400");
+    }
+
+    function selectStyle(st, el) {
+      state.speakingStyle = st;
+      document.querySelectorAll(".style-card").forEach(c => {
+        c.classList.remove("border-2", "border-amber-400");
+        c.classList.add("border", "border-gray-800");
+        c.children[0].className = "font-bold text-white";
+      });
+      el.classList.remove("border", "border-gray-800");
+      el.classList.add("border-2", "border-amber-400");
+      el.children[0].className = "font-bold text-amber-300";
+    }
+
+    let activePlayBtn = null;
+    async function playVoiceSample(event, voiceKey, btn) {
+      event.stopPropagation();
+      const player = document.getElementById("samplePreviewPlayer");
+      if (activePlayBtn && activePlayBtn !== btn) activePlayBtn.innerText = "▶";
+      if (!player.paused && activePlayBtn === btn) {
+        player.pause();
+        btn.innerText = "▶";
+        return;
+      }
+      activePlayBtn = btn;
+      btn.innerText = "⏳";
+      try {
+        const res = await fetch(`/api/voice-sample/${voiceKey}?user_id=${userId}&style=${state.speakingStyle}`);
+        const rawText = await res.text();
+        let data = {};
+        try { data = JSON.parse(rawText); } catch(e) { throw new Error(rawText); }
+        if (!res.ok) throw new Error(data.detail || "အသံနမူနာ ဖွင့်မရပါ");
+        player.src = data.audio_url + "?t=" + Date.now();
+        btn.innerText = "⏸";
+        await player.play();
+        player.onended = () => { btn.innerText = "▶"; };
+      } catch (err) {
+        btn.innerText = "▶";
+        alert(err.message);
+      }
+    }
+
     function handleVideoUpload(input) {
       const file = input.files[0];
       if (!file) return;
-
       const progBox = document.getElementById("uploadProgressBox");
       const fill = document.getElementById("uploadBarFill");
       const pctText = document.getElementById("uploadPercentText");
@@ -814,10 +914,38 @@ HTML_UI = """<!DOCTYPE html>
           vid.src = URL.createObjectURL(file);
           vid.classList.remove("hidden");
           document.getElementById("emptyVideoPlaceholder").classList.add("hidden");
+          document.getElementById("customVideoBar").classList.remove("hidden");
         }
         fill.style.width = pct + "%";
         pctText.innerText = pct + "%";
       }, 60);
+    }
+
+    // CUSTOM VIDEO PLAYER CONTROLS (STAYS NORMAL EVEN WHEN VIDEO IS FLIPPED!)
+    function togglePlayPreview() {
+      const vid = document.getElementById("videoPreview");
+      const btn = document.getElementById("playPauseBtn");
+      if (vid.paused) { vid.play(); btn.innerText = "⏸"; }
+      else { vid.pause(); btn.innerText = "▶"; }
+    }
+    function fmtTime(sec) {
+      if (!sec || isNaN(sec)) return "0:00";
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return m + ":" + (s < 10 ? "0" : "") + s;
+    }
+    function updateCustomSeek() {
+      const vid = document.getElementById("videoPreview");
+      const slider = document.getElementById("videoSeekSlider");
+      const txt = document.getElementById("videoTimeText");
+      if (vid.duration) {
+        slider.value = (vid.currentTime / vid.duration) * 100;
+        txt.innerText = fmtTime(vid.currentTime) + " / " + fmtTime(vid.duration);
+      }
+    }
+    function seekPreviewVideo(val) {
+      const vid = document.getElementById("videoPreview");
+      if (vid.duration) vid.currentTime = (val / 100) * vid.duration;
     }
 
     function setMaskMode(mode) {
@@ -827,14 +955,8 @@ HTML_UI = """<!DOCTYPE html>
         document.getElementById("mask-" + m).className = "py-2.5 rounded-xl bg-[#1e2030] border border-gray-700 text-xs font-bold text-gray-300";
       });
       document.getElementById("mask-" + mode).className = "py-2.5 rounded-xl grad-pill text-xs font-extrabold";
-
-      if (mode === "none") {
-        box.classList.add("hidden");
-      } else {
-        box.classList.remove("hidden");
-        box.style.backgroundColor = "rgba(255,255,255,0.15)";
-        box.style.backdropFilter = "blur(10px)";
-      }
+      if (mode === "none") box.classList.add("hidden");
+      else box.classList.remove("hidden");
     }
 
     function toggleFlipVideo() {
@@ -850,51 +972,22 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
+    // Draggable & Resizable Mask Box
     const container = document.getElementById("previewContainer");
     const maskBox = document.getElementById("maskBox");
     const resizeHandle = document.getElementById("resizeHandle");
     const subPill = document.getElementById("subPosPill");
-
     let dragTarget = null, startX = 0, startY = 0, startLeft = 0, startTop = 0, startW = 0, startH = 0;
 
     function getClientXY(e) {
       return e.touches ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY };
     }
-
-    maskBox.addEventListener("mousedown", startDrag);
-    maskBox.addEventListener("touchstart", startDrag, { passive: false });
-    resizeHandle.addEventListener("mousedown", startResize);
-    resizeHandle.addEventListener("touchstart", startResize, { passive: false });
-    subPill.addEventListener("mousedown", startSubDrag);
-    subPill.addEventListener("touchstart", startSubDrag, { passive: false });
-
-    function startDrag(e) {
-      if (e.target === resizeHandle) return;
-      e.preventDefault();
-      dragTarget = "move";
-      const pt = getClientXY(e);
-      startX = pt.x; startY = pt.y;
-      startLeft = maskBox.offsetLeft; startTop = maskBox.offsetTop;
-    }
-    function startResize(e) {
-      e.stopPropagation(); e.preventDefault();
-      dragTarget = "resize";
-      const pt = getClientXY(e);
-      startX = pt.x; startY = pt.y;
-      startW = maskBox.offsetWidth; startH = maskBox.offsetHeight;
-    }
-    function startSubDrag(e) {
-      e.preventDefault();
-      dragTarget = "sub";
-      const pt = getClientXY(e);
-      startY = pt.y;
-      startTop = subPill.offsetTop;
-    }
-
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("touchmove", onMove, { passive: false });
-    window.addEventListener("mouseup", () => dragTarget = null);
-    window.addEventListener("touchend", () => dragTarget = null);
+    maskBox.addEventListener("mousedown", e => { if (e.target === resizeHandle) return; e.preventDefault(); dragTarget = "move"; const pt = getClientXY(e); startX = pt.x; startY = pt.y; startLeft = maskBox.offsetLeft; startTop = maskBox.offsetTop; });
+    maskBox.addEventListener("touchstart", e => { if (e.target === resizeHandle) return; e.preventDefault(); dragTarget = "move"; const pt = getClientXY(e); startX = pt.x; startY = pt.y; startLeft = maskBox.offsetLeft; startTop = maskBox.offsetTop; }, { passive: false });
+    resizeHandle.addEventListener("mousedown", e => { e.stopPropagation(); e.preventDefault(); dragTarget = "resize"; const pt = getClientXY(e); startX = pt.x; startY = pt.y; startW = maskBox.offsetWidth; startH = maskBox.offsetHeight; });
+    resizeHandle.addEventListener("touchstart", e => { e.stopPropagation(); e.preventDefault(); dragTarget = "resize"; const pt = getClientXY(e); startX = pt.x; startY = pt.y; startW = maskBox.offsetWidth; startH = maskBox.offsetHeight; }, { passive: false });
+    subPill.addEventListener("mousedown", e => { e.preventDefault(); dragTarget = "sub"; const pt = getClientXY(e); startY = pt.y; startTop = subPill.offsetTop; });
+    subPill.addEventListener("touchstart", e => { e.preventDefault(); dragTarget = "sub"; const pt = getClientXY(e); startY = pt.y; startTop = subPill.offsetTop; }, { passive: false });
 
     function onMove(e) {
       if (!dragTarget) return;
@@ -903,105 +996,29 @@ HTML_UI = """<!DOCTYPE html>
       if (dragTarget === "move") {
         let nl = Math.max(0, Math.min(cw - maskBox.offsetWidth, startLeft + (pt.x - startX)));
         let nt = Math.max(0, Math.min(ch - maskBox.offsetHeight, startTop + (pt.y - startY)));
-        maskBox.style.left = (nl / cw * 100) + "%";
-        maskBox.style.top = (nt / ch * 100) + "%";
+        maskBox.style.left = (nl / cw * 100) + "%"; maskBox.style.top = (nt / ch * 100) + "%";
       } else if (dragTarget === "resize") {
         let nw = Math.max(40, Math.min(cw - maskBox.offsetLeft, startW + (pt.x - startX)));
         let nh = Math.max(20, Math.min(ch - maskBox.offsetTop, startH + (pt.y - startY)));
-        maskBox.style.width = (nw / cw * 100) + "%";
-        maskBox.style.height = (nh / ch * 100) + "%";
+        maskBox.style.width = (nw / cw * 100) + "%"; maskBox.style.height = (nh / ch * 100) + "%";
       } else if (dragTarget === "sub") {
         let nt = Math.max(10, Math.min(ch - 36, startTop + (pt.y - startY)));
-        subPill.style.bottom = "auto";
-        subPill.style.top = (nt / ch * 100) + "%";
+        subPill.style.bottom = "auto"; subPill.style.top = (nt / ch * 100) + "%";
       }
     }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("mouseup", () => dragTarget = null);
+    window.addEventListener("touchend", () => dragTarget = null);
 
     function activateGroup(cls, el) {
-      document.querySelectorAll("." + cls).forEach(b => {
-        b.className = b.className.replace("grad-pill", "bg-[#1e2030] border border-gray-800 text-gray-300");
-      });
+      document.querySelectorAll("." + cls).forEach(b => { b.className = b.className.replace("grad-pill", "bg-[#1e2030] border border-gray-800 text-gray-300"); });
       el.className = el.className.replace("bg-[#1e2030] border border-gray-800 text-gray-300", "grad-pill");
     }
-
-    function setSubSize(code, label, px, el) {
-      activateGroup("size-btn", el);
-      document.getElementById("subSizeLabel").innerText = label;
-      document.getElementById("liveSubSample").style.fontSize = px + "px";
-    }
-    function setLineGap(label, lh, el) {
-      activateGroup("gap-btn", el);
-      document.getElementById("lineGapLabel").innerText = label;
-      document.getElementById("liveSubSample").style.lineHeight = lh;
-    }
+    function setSubSize(code, label, px, el) { activateGroup("size-btn", el); document.getElementById("subSizeLabel").innerText = label; }
     function setRatio(r, el) { state.ratio = r; activateGroup("ratio-btn", el); }
-    function setRes(r, el) { state.res = r; activateGroup("res-btn", el); }
-    function setSubEnabled(val, el) {
-      state.subEnabled = val;
-      activateGroup("suben-btn", el);
-      subPill.style.display = val ? "block" : "none";
-    }
-    function setFontStyle(style, el) {
-      activateGroup("font-btn", el);
-      const s = document.getElementById("liveSubSample");
-      s.style.fontFamily = style === "serif" ? "serif" : "sans-serif";
-    }
-    function setColorPreset(cls, el) {
-      document.querySelectorAll(".preset-btn").forEach(b => b.classList.remove("border-2", "border-purple-500"));
-      el.classList.add("border-2", "border-purple-500");
-      document.getElementById("sampleHighlight").className = cls;
-    }
-    function selectVoice(v, el) {
-      state.voice = v;
-      document.querySelectorAll(".voice-card").forEach(c => {
-        c.classList.remove("border-2", "border-purple-500");
-        c.classList.add("border", "border-gray-800");
-      });
-      el.classList.remove("border", "border-gray-800");
-      el.classList.add("border-2", "border-purple-500");
-    }
-    function setSpeed(val, label, el) {
-      state.speed = val;
-      document.getElementById("speedBadge").innerText = label;
-      activateGroup("spd-btn", el);
-    }
+    function setSpeed(val, label, el) { state.speed = val; document.getElementById("speedBadge").innerText = label; activateGroup("spd-btn", el); }
 
-    // PLAY VOICE SAMPLE PREVIEW
-    let activePlayBtn = null;
-    async function playVoiceSample(event, voiceKey, btn) {
-      event.stopPropagation();
-      const player = document.getElementById("samplePreviewPlayer");
-
-      if (activePlayBtn && activePlayBtn !== btn) {
-        activePlayBtn.innerText = "▶";
-      }
-      if (!player.paused && activePlayBtn === btn) {
-        player.pause();
-        btn.innerText = "▶";
-        return;
-      }
-
-      activePlayBtn = btn;
-      btn.innerText = "⏳";
-
-      try {
-        const res = await fetch(`/api/voice-sample/${voiceKey}?user_id=${userId}`);
-        const rawText = await res.text();
-        let data = {};
-        try { data = JSON.parse(rawText); } catch(e) { throw new Error(rawText); }
-        if (!res.ok) throw new Error(data.detail || "အသံနမူနာ ဖွင့်မရပါ");
-
-        player.src = data.audio_url;
-        btn.innerText = "⏸";
-        await player.play();
-        player.onended = () => { btn.innerText = "▶"; };
-      } catch (err) {
-        btn.innerText = "▶";
-        alert(err.message);
-      }
-    }
-
-    // FAST AUTO AI TRANSLATE
     async function autoTranslateVideo() {
       const file = document.getElementById("videoInput").files[0];
       if (!file) return alert("Video ဖိုင် အရင်ရွေးပါ။");
@@ -1011,6 +1028,7 @@ HTML_UI = """<!DOCTYPE html>
 
       const fd = new FormData();
       fd.append("video", file);
+      fd.append("pov_mode", state.povMode);
       try {
         const res = await fetch("/api/auto-script", { method: "POST", body: fd });
         const rawText = await res.text();
@@ -1026,7 +1044,6 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
-    // START RECAP RENDER
     async function startRecapRender() {
       const file = document.getElementById("videoInput").files[0];
       const script = document.getElementById("recapScript").value.trim();
@@ -1050,7 +1067,7 @@ HTML_UI = """<!DOCTYPE html>
           if (pct > 92) pct = 92;
           fill.style.width = pct + "%";
           pctLabel.innerText = pct + "%";
-          statusMsg.innerText = `⏳ Video ကြာချိန်နှင့် အသံကို အတိအကျ ညှိ၍ Render လုပ်နေပါသည် (${pct}%)...`;
+          statusMsg.innerText = `⏳ Video ကို Render လုပ်နေပါသည် (${pct}%)...`;
         }
       }, 600);
 
@@ -1060,14 +1077,17 @@ HTML_UI = """<!DOCTYPE html>
       const boxY = Math.round((maskBox.offsetTop / ch) * 100);
       const boxW = Math.round((maskBox.offsetWidth / cw) * 100);
       const boxH = Math.round((maskBox.offsetHeight / ch) * 100);
+      const muteOrig = document.getElementById("muteOriginalAudio").checked ? "1" : "0";
 
       const fd = new FormData();
       fd.append("user_id", userId);
       fd.append("script_text", script);
       fd.append("voice_type", state.voice);
+      fd.append("speaking_style", state.speakingStyle);
       fd.append("speed", state.speed);
       fd.append("mask_mode", state.maskMode);
       fd.append("flip_h", state.flipH ? "1" : "0");
+      fd.append("mute_orig", muteOrig);
       fd.append("box_x", boxX);
       fd.append("box_y", boxY);
       fd.append("box_w", boxW);
@@ -1085,14 +1105,24 @@ HTML_UI = """<!DOCTYPE html>
 
         fill.style.width = "100%";
         pctLabel.innerText = "100%";
-        statusMsg.innerText = "🎉 Render 100% ပြီးစီးပါပြီ! (မူရင်း Video ကြာချိန်အတိုင်း ထွက်လာပါပြီ)";
+        statusMsg.innerText = "🎉 Render 100% ပြီးစီးပါပြီ! အောက်က ခလုတ်ကို နှိပ်ပါ။";
         state.lastVideoUrl = data.video_url;
-        document.getElementById("hdDownloadLink").href = data.video_url;
         doneActions.classList.remove("hidden");
         loadUser();
       } catch (err) {
         clearInterval(timer);
         statusMsg.innerText = "❌ Error: " + err.message;
+      }
+    }
+
+    // WORKING HD DOWNLOAD BUTTON FOR TELEGRAM WEBVIEW & MOBILE BROWSER
+    function downloadHdVideo() {
+      if (!state.lastVideoUrl) return alert("Video မရှိသေးပါ။");
+      const fullUrl = window.location.origin + state.lastVideoUrl + "?download=1";
+      if (tg && tg.openLink) {
+        tg.openLink(fullUrl);
+      } else {
+        window.open(fullUrl, "_blank");
       }
     }
 
@@ -1117,6 +1147,7 @@ HTML_UI = """<!DOCTYPE html>
       fd.append("user_id", userId);
       fd.append("text", text);
       fd.append("voice_type", state.voice);
+      fd.append("speaking_style", state.speakingStyle);
       fd.append("speed", state.speed);
       const res = await fetch("/api/tts", { method: "POST", body: fd });
       const data = await res.json();
@@ -1150,33 +1181,18 @@ HTML_UI = """<!DOCTYPE html>
       document.getElementById("cloneModal").classList.add("hidden");
     }
 
-    function copyPhone() {
-      navigator.clipboard.writeText("09409700002");
-      alert("09409700002 (Kaung San Phyo) ကို Copy ကူးပြီးပါပြီ။");
-    }
-    function selectPlan(name, amount, pts) {
-      state.selectedPlan = { name, amount, pts };
-      document.getElementById("selectedPlanLabel").innerText = `${name} (${amount} - ${pts} pts)`;
-      document.getElementById("paymentBox").classList.remove("hidden");
-    }
+    function copyPhone() { navigator.clipboard.writeText("09409700002"); alert("09409700002 (Kaung San Phyo) ကို Copy ကူးပြီးပါပြီ။"); }
+    function selectPlan(name, amount, pts) { state.selectedPlan = { name, amount, pts }; document.getElementById("selectedPlanLabel").innerText = `${name} (${amount} - ${pts} pts)`; document.getElementById("paymentBox").classList.remove("hidden"); }
     async function submitPayment() {
       const file = document.getElementById("receiptFile").files[0];
       if (!file) return alert("ပြေစာပုံ ရွေးပါ။");
       const fd = new FormData();
-      fd.append("user_id", userId);
-      fd.append("plan_name", state.selectedPlan.name);
-      fd.append("amount", state.selectedPlan.amount);
-      fd.append("points", state.selectedPlan.pts);
-      fd.append("receipt", file);
+      fd.append("user_id", userId); fd.append("plan_name", state.selectedPlan.name); fd.append("amount", state.selectedPlan.amount); fd.append("points", state.selectedPlan.pts); fd.append("receipt", file);
       const res = await fetch("/api/submit-payment", { method: "POST", body: fd });
-      if (res.ok) {
-        alert("✅ ပြေစာ ပေးပို့ပြီးပါပြီ!");
-        document.getElementById("paymentBox").classList.add("hidden");
-      }
+      if (res.ok) { alert("✅ ပြေစာ ပေးပို့ပြီးပါပြီ!"); document.getElementById("paymentBox").classList.add("hidden"); }
     }
     async function earnFreePoints() {
-      const fd = new FormData();
-      fd.append("user_id", userId);
+      const fd = new FormData(); fd.append("user_id", userId);
       const res = await fetch("/api/earn-ad", { method: "POST", body: fd });
       if (res.ok) { alert("🎉 +5 Points ရရှိပါပြီ!"); loadUser(); }
     }
@@ -1194,7 +1210,7 @@ async def api_user(user_id: int):
     return get_or_create_user(user_id)
 
 @app.get("/api/voice-sample/{voice_key}")
-async def api_voice_sample(voice_key: str, user_id: int = 1638781080):
+async def api_voice_sample(voice_key: str, user_id: int = 1638781080, style: str = "storytelling"):
     if voice_key == "cloned":
         user = get_or_create_user(user_id)
         if not user["cloned_voice_id"]:
@@ -1204,16 +1220,29 @@ async def api_voice_sample(voice_key: str, user_id: int = 1638781080):
             generate_cloned_tts("မင်္ဂလာပါ။ ဒါကတော့ သင့်ရဲ့ ကိုယ်ပိုင် အသံတူပွား နမူနာ ဖြစ်ပါတယ်။", user["cloned_voice_id"], out_path)
         return {"audio_url": f"/{out_path}"}
 
-    if voice_key not in FREE_VOICES:
-        raise HTTPException(status_code=404, detail="Voice not found")
+    if voice_key in EDGE_VOICES:
+        out_path = f"outputs/sample_{voice_key}_{style}.mp3"
+        if not os.path.exists(out_path):
+            await generate_edge_tts(EDGE_VOICES[voice_key]["sample"], voice_key, style, 1.0, out_path)
+        return {"audio_url": f"/{out_path}"}
 
-    out_path = f"outputs/sample_{voice_key}.mp3"
-    if not os.path.exists(out_path):
-        await generate_free_burmese_tts(FREE_VOICES[voice_key]["sample"], voice_key, 1.0, out_path)
-    return {"audio_url": f"/{out_path}"}
+    if voice_key in GOOGLE_VOICES:
+        g_cfg = GOOGLE_VOICES[voice_key]
+        out_path = f"outputs/sample_{voice_key}.mp3"
+        if not os.path.exists(out_path):
+            generate_google_gemini_tts(g_cfg["sample"], g_cfg["name"], "storytelling", out_path)
+        return {"audio_url": f"/{out_path}"}
+
+    raise HTTPException(status_code=404, detail="Voice not found")
 
 @app.post("/api/tts")
-async def api_tts(user_id: int = Form(...), text: str = Form(...), voice_type: str = Form(...), speed: float = Form(1.0)):
+async def api_tts(
+    user_id: int = Form(...),
+    text: str = Form(...),
+    voice_type: str = Form(...),
+    speaking_style: str = Form("storytelling"),
+    speed: float = Form(1.0)
+):
     user = get_or_create_user(user_id)
     file_id = str(uuid.uuid4())[:8]
     out_path = f"outputs/tts_{file_id}.mp3"
@@ -1221,13 +1250,19 @@ async def api_tts(user_id: int = Form(...), text: str = Form(...), voice_type: s
     if voice_type == "cloned":
         cost = max(1, len(text) // 20)
         if user["points"] < cost:
-            raise HTTPException(status_code=402, detail="Point မလုံလောက်ပါ။ Free အသံ (၃) မျိုးကို ပြောင်းသုံးနိုင်ပါသည်။")
+            raise HTTPException(status_code=402, detail="Point မလုံလောက်ပါ။ Free Edge အသံများကို ပြောင်းသုံးနိုင်ပါသည်။")
         if not user["cloned_voice_id"]:
             raise HTTPException(status_code=400, detail="အသံတူပွား (Voice Clone) အရင်ဖန်တီးပါ။")
         generate_cloned_tts(text, user["cloned_voice_id"], out_path)
         update_points(user_id, -cost)
+    elif voice_type in GOOGLE_VOICES:
+        cost = max(1, len(text) // 25)
+        if user["points"] < cost:
+            raise HTTPException(status_code=402, detail="Point မလုံလောက်ပါ။ Free Edge အသံ (Nilar / Thiha) ကို အခမဲ့ သုံးနိုင်ပါသည်။")
+        generate_google_gemini_tts(text, GOOGLE_VOICES[voice_type]["name"], speaking_style, out_path)
+        update_points(user_id, -cost)
     else:
-        await generate_free_burmese_tts(text, voice_type, speed, out_path)
+        await generate_edge_tts(text, voice_type, speaking_style, speed, out_path)
 
     return {"audio_url": f"/outputs/tts_{file_id}.mp3"}
 
@@ -1252,7 +1287,7 @@ async def api_clone_voice(user_id: int = Form(...), voice_name: str = Form(...),
     return {"status": "success", "voice_id": voice_id}
 
 @app.post("/api/auto-script")
-async def api_auto_script(video: UploadFile = File(...)):
+async def api_auto_script(video: UploadFile = File(...), pov_mode: str = Form("first")):
     job_id = str(uuid.uuid4())[:8]
     in_vid = f"uploads/tmp_{job_id}_{video.filename}"
     in_aud = f"uploads/tmp_{job_id}.mp3"
@@ -1272,7 +1307,7 @@ async def api_auto_script(video: UploadFile = File(...)):
         if res.returncode != 0 or not os.path.exists(in_aud):
             raise HTTPException(status_code=500, detail=f"Audio ခွဲထုတ်မရပါ: {res.stderr[-200:]}")
 
-        script = call_gemini_audio(in_aud, vid_dur)
+        script = call_gemini_audio(in_aud, vid_dur, pov_mode)
         return {"script": script}
     except HTTPException as he:
         raise he
@@ -1283,10 +1318,12 @@ async def api_auto_script(video: UploadFile = File(...)):
 async def api_render_recap(
     user_id: int = Form(...),
     script_text: str = Form(...),
-    voice_type: str = Form("maung_thiha"),
+    voice_type: str = Form("edge_nilar"),
+    speaking_style: str = Form("storytelling"),
     speed: float = Form(1.0),
     mask_mode: str = Form("blur"),
     flip_h: str = Form("0"),
+    mute_orig: str = Form("1"),
     box_x: int = Form(10),
     box_y: int = Form(62),
     box_w: int = Form(80),
@@ -1311,8 +1348,12 @@ async def api_render_recap(
         if voice_type == "cloned" and user["cloned_voice_id"] and user["points"] >= 10:
             generate_cloned_tts(script_text, user["cloned_voice_id"], raw_tts)
             update_points(user_id, -10)
+        elif voice_type in GOOGLE_VOICES and user["points"] >= 5:
+            generate_google_gemini_tts(script_text, GOOGLE_VOICES[voice_type]["name"], speaking_style, raw_tts)
+            update_points(user_id, -5)
         else:
-            await generate_free_burmese_tts(script_text, voice_type if voice_type != "cloned" else "maung_thiha", speed, raw_tts)
+            fallback_voice = voice_type if voice_type in EDGE_VOICES else "edge_nilar"
+            await generate_edge_tts(script_text, fallback_voice, speaking_style, speed, raw_tts)
 
         tts_dur = get_media_duration(raw_tts)
         if vid_dur > 0 and tts_dur > 0:
@@ -1342,8 +1383,9 @@ async def api_render_recap(
 
         vf_str = ",".join(filters) if filters else "null"
 
-        if vid_has_audio:
-            filter_complex = f"[0:v]{vf_str}[v];[0:a]volume=0.12[bg];[1:a]volume=1.35[fg];[bg][fg]amix=inputs=2:duration=first[a]"
+        # MUTE ORIGINAL AUDIO COMPLETELY WHEN mute_orig == "1" (Default)
+        if mute_orig == "0" and vid_has_audio:
+            filter_complex = f"[0:v]{vf_str}[v];[0:a]volume=0.08[bg];[1:a]volume=1.35[fg];[bg][fg]amix=inputs=2:duration=first[a]"
         else:
             filter_complex = f"[0:v]{vf_str}[v];[1:a]volume=1.35[a]"
 
@@ -1407,5 +1449,8 @@ async def api_earn_ad(user_id: int = Form(...)):
     return {"points": get_or_create_user(user_id)["points"]}
 
 @app.get("/outputs/{filename}")
-async def get_output(filename: str):
-    return FileResponse(f"outputs/{filename}")
+async def get_output(filename: str, download: int = 0):
+    file_path = f"outputs/{filename}"
+    if download == 1:
+        return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
+    return FileResponse(file_path)
