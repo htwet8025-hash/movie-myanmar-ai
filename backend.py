@@ -50,10 +50,9 @@ def ensure_burmese_font():
                 if r.status_code == 200 and len(r.content) > 10000:
                     with open(BURMESE_FONT_PATH, "wb") as f:
                         f.write(r.content)
-                    print("Downloaded Burmese font successfully!")
                     break
-            except Exception as e:
-                print(f"Font download retry: {e}")
+            except Exception:
+                pass
 
 ensure_burmese_font()
 
@@ -64,6 +63,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- RENDER JOB PROGRESS TRACKER (1% -> 100%) ---
+RENDER_JOBS = {}
 
 # --- DATABASE SETUP ---
 def init_db():
@@ -119,29 +121,32 @@ def calc_text_credits(text: str) -> int:
     return max(1, math.ceil(clean_len / 20))
 
 # --- MEDIA HELPERS ---
+def get_media_duration(file_path: str) -> float:
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", file_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        return float(res.stdout.strip())
+    except Exception:
+        return 0.0
+
 def get_video_info(file_path: str):
     dur, w, h = 0.0, 720, 1280
     try:
         cmd = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height:format=duration",
+            "-show_entries", "stream=width,height",
             "-of", "default=noprint_wrappers=1:nokey=1", file_path
         ]
         res = subprocess.run(cmd, capture_output=True, text=True)
         lines = [x.strip() for x in res.stdout.strip().splitlines() if x.strip()]
-        if len(lines) >= 3:
-            w, h, dur = int(lines[0]), int(lines[1]), float(lines[2])
+        if len(lines) >= 2:
+            w, h = int(lines[0]), int(lines[1])
     except Exception:
         pass
-    if dur <= 0:
-        try:
-            r2 = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
-                capture_output=True, text=True
-            )
-            dur = float(r2.stdout.strip())
-        except Exception:
-            pass
+    dur = get_media_duration(file_path)
     return w, h, dur
 
 def has_audio_stream(file_path: str) -> bool:
@@ -287,7 +292,7 @@ def clone_voice_elevenlabs(user_id: int, voice_name: str, file_path: str):
         files = {"files": (os.path.basename(file_path), f, "audio/mpeg")}
         res = requests.post(url, headers=headers, data=data, files=files)
     if res.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"Voice Clone မအောင်မြင်ပါ: {res.text}")
+        raise HTTPException(status_code=400, detail="အသံတူပွား ဖန်တီးမှု မအောင်မြင်ပါ။ နောက်တစ်ကြိမ် ထပ်စမ်းကြည့်ပါ။")
     voice_id = res.json().get("voice_id")
     conn = sqlite3.connect("movie_myanmar_ai.db")
     c = conn.cursor()
@@ -313,7 +318,7 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
 # --- FAST AUTO TRANSLATE ---
 def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, speaking_style: str) -> str:
     if not GEMINI_API_KEY:
-        raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။")
+        raise HTTPException(status_code=400, detail="AI API Key မထည့်ရသေးပါ။")
 
     with open(audio_path, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -356,7 +361,6 @@ def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, 
         }]
     }
 
-    last_err = ""
     for model_name in ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-2.5-flash"]:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
@@ -366,13 +370,10 @@ def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, 
                 text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
                 if text:
                     return text
-                last_err = f"Empty response from {model_name}"
-            else:
-                last_err = f"{model_name} ({res.status_code}): {res.text}"
-        except Exception as req_e:
-            last_err = str(req_e)
+        except Exception:
+            continue
 
-    raise HTTPException(status_code=500, detail=f"Gemini Error: {last_err}")
+    raise HTTPException(status_code=500, detail="AI စာသားဘာသာပြန်ရာတွင် ခေတ္တချို့ယွင်းနေပါသည်။ ခဏနေမှ ထပ်မံကြိုးစားကြည့်ပါ။")
 
 # --- BUILD SYNCED DUBBING AUDIO + PNG SUBTITLE TIMELINE ---
 async def build_synced_dub_and_png_subs(
@@ -418,6 +419,7 @@ async def build_synced_dub_and_png_subs(
     png_overlays = []
 
     if not segments:
+        RENDER_JOBS[job_id] = {"pct": 25, "msg": "⏳ မြန်မာအသံဖိုင် ဖန်တီးနေပါသည် (25%)..."}
         clean_txt = script_text.strip()
         raw_tts = f"outputs/raw_{job_id}.mp3"
         if voice_type == "cloned":
@@ -437,6 +439,7 @@ async def build_synced_dub_and_png_subs(
         else:
             subprocess.run(["ffmpeg", "-y", "-i", raw_tts, final_audio_out], check=True)
 
+        RENDER_JOBS[job_id] = {"pct": 45, "msg": "⏳ မြန်မာစာတန်းထိုးများ ပြင်ဆင်နေပါသည် (45%)..."}
         if sub_enabled:
             sentences = [s.strip() for s in re.split(r"[။\n]+", clean_txt) if s.strip()]
             if not sentences:
@@ -452,7 +455,11 @@ async def build_synced_dub_and_png_subs(
         return png_overlays
 
     clip_files = []
+    total_segs = len(segments)
     for idx, (start_s, end_s, gender, txt) in enumerate(segments):
+        cur_pct = 20 + int(((idx + 1) / max(1, total_segs)) * 35)
+        RENDER_JOBS[job_id] = {"pct": cur_pct, "msg": f"⏳ အသံနှင့် စာတန်းများ ထုတ်နေပါသည် ({cur_pct}%)..."}
+
         seg_dur = max(0.8, end_s - start_s)
         raw_clip = f"outputs/seg_raw_{job_id}_{idx}.mp3"
         fit_clip = f"outputs/seg_fit_{job_id}_{idx}.mp3"
@@ -482,6 +489,7 @@ async def build_synced_dub_and_png_subs(
 
     update_points(user_id, -credit_cost)
 
+    RENDER_JOBS[job_id] = {"pct": 58, "msg": "⏳ အသံလမ်းကြောင်းများ ပေါင်းစပ်နေပါသည် (58%)..."}
     total_dur = max(vid_dur, segments[-1][1] + 0.5)
     cmd = ["ffmpeg", "-y", "-f", "lavfi", "-t", f"{total_dur:.3f}", "-i", "anullsrc=r=24000:cl=mono"]
     filter_parts = []
@@ -834,7 +842,7 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- STEP 1: NARRATION POV STYLE (INCLUDES AUTO ကျား/မ အပြန်အလှန်ပြော) -->
+        <!-- STEP 1: NARRATION POV STYLE -->
         <div class="space-y-2 pt-2 border-t border-gray-800">
           <div class="text-xs font-extrabold text-amber-400 tracking-wide">① မြန်မာဘာသာပြန် SCRIPT</div>
           <div class="text-xs font-bold text-gray-300">ဇာတ်ကြောင်းပုံစံ</div>
@@ -915,7 +923,7 @@ HTML_UI = """<!DOCTYPE html>
       <audio id="ttsOnlyAudio" controls class="w-full hidden"></audio>
     </div>
 
-    <!-- VOICEOVER SELECTION (CLEAN: ONLY NILAR, THIHA, & CLONED VOICE) -->
+    <!-- VOICEOVER SELECTION -->
     <div class="card-dark rounded-2xl p-4 space-y-3">
       <div class="flex justify-between items-center">
         <div class="text-xs font-extrabold text-amber-400 tracking-wide">② VOICEOVER အသံ (အလုံး 20 = 1 Credit)</div>
@@ -990,7 +998,7 @@ HTML_UI = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- MAIN RENDER BUTTON + PROGRESS + DOWNLOAD -->
+    <!-- MAIN RENDER BUTTON + SMOOTH 1% TO 100% PROGRESS + DOWNLOAD -->
     <div id="renderSection" class="space-y-3">
       <button onclick="startRecapRender()" id="mainRenderBtn" class="w-full py-4 rounded-2xl grad-btn text-base shadow-xl flex items-center justify-center gap-2 active:scale-98">
         🎬 Recap Video ထုတ်မယ်
@@ -999,12 +1007,12 @@ HTML_UI = """<!DOCTYPE html>
       <div id="renderProgressCard" class="hidden card-dark rounded-2xl p-4 space-y-3">
         <div class="flex justify-between items-center text-xs font-bold">
           <span class="text-gray-300">🎬 RECAP VIDEO</span>
-          <span id="renderPercentLabel" class="text-teal-400 font-extrabold">0%</span>
+          <span id="renderPercentLabel" class="text-teal-400 font-extrabold">1%</span>
         </div>
         <div class="w-full h-3 bg-gray-800 rounded-full overflow-hidden">
-          <div id="renderBarFill" class="h-full grad-pill transition-all duration-300" style="width: 0%"></div>
+          <div id="renderBarFill" class="h-full grad-pill transition-all duration-300" style="width: 1%"></div>
         </div>
-        <p id="renderStatusMsg" class="text-xs text-gray-300">⏳ Video ကို Render လုပ်နေပါသည် (1% - 100%)...</p>
+        <p id="renderStatusMsg" class="text-xs text-gray-300">⏳ Video ဖိုင်ကို စတင်ပြင်ဆင်နေပါသည် (1%)...</p>
 
         <div id="renderDoneActions" class="hidden space-y-2.5 pt-1">
           <p class="text-xs font-bold text-emerald-400">✅ ပြီးပါပြီ — အောက်က ခလုတ်ကို နှိပ်ပါ</p>
@@ -1019,7 +1027,7 @@ HTML_UI = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- TAB 2: ငွေဖြည့် / CREDIT PACKAGES (KBZPay, WavePay, UABPay) -->
+  <!-- TAB 2: ငွေဖြည့် / CREDIT PACKAGES -->
   <div id="tab-plans" class="hidden px-4 mt-3 space-y-3">
     <div class="flex items-center justify-between">
       <h2 class="font-extrabold text-base text-white">💳 ငွေဖြည့် (Credit ဝယ်ယူရန်)</h2>
@@ -1030,7 +1038,6 @@ HTML_UI = """<!DOCTYPE html>
 
     <p class="text-xs font-bold text-gray-300">၁ · Package ရွေးပါ</p>
 
-    <!-- PACKAGE 1: STARTER -->
     <div onclick="selectPackage('Starter', '10,000 ကျပ် (≈ 80 บาท)', 10000, this)" class="pkg-card card-dark p-4 rounded-2xl space-y-3 cursor-pointer border border-gray-800">
       <div class="flex justify-between items-start">
         <div class="flex items-center gap-2.5">
@@ -1061,7 +1068,6 @@ HTML_UI = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- PACKAGE 2: STANDARD (+15% BONUS) -->
     <div onclick="selectPackage('Standard (+15% Bonus)', '30,000 ကျပ် (≈ 240 บาท)', 34500, this)" class="pkg-card card-dark p-4 rounded-2xl space-y-3 cursor-pointer border-2 border-emerald-500">
       <div class="flex justify-between items-start">
         <div class="flex items-start gap-2.5">
@@ -1100,7 +1106,6 @@ HTML_UI = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- PACKAGE 3: PRO (+20% BONUS) -->
     <div onclick="selectPackage('Pro (+20% Bonus)', '50,000 ကျပ် (≈ 400 บาท)', 60000, this)" class="pkg-card card-dark p-4 rounded-2xl space-y-3 cursor-pointer border border-gray-800">
       <div class="flex justify-between items-start">
         <div class="flex items-center gap-2.5">
@@ -1140,7 +1145,6 @@ HTML_UI = """<!DOCTYPE html>
       * စာသားမှ အသံပြောင်းခြင်းအတွက် စာသားအလုံး ၂၀ လျှင် 1 Credit (၁ လုံး = 0.05 Credit) နှုန်းဖြင့် နုတ်ယူပါသည်။
     </p>
 
-    <!-- STEP 2: PAYMENT METHOD (KBZPay, WavePay, UABPay) -->
     <p class="text-xs font-bold text-gray-300 pt-1">၂ · ငွေပေးနည်း ရွေးပါ</p>
     <div class="grid grid-cols-3 gap-2 text-center">
       <div onclick="selectPayMethod('KBZPay', this)" class="pay-card p-3 rounded-2xl bg-[#1e2030] border-2 border-sky-400 cursor-pointer">
@@ -1160,7 +1164,6 @@ HTML_UI = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- ACCOUNT DETAILS & RECEIPT UPLOAD BOX -->
     <div class="card-dark p-4 rounded-2xl space-y-3 border-emerald-500/40">
       <div class="flex justify-between items-center bg-[#10121b] p-3 rounded-xl border border-gray-800">
         <div>
@@ -1210,7 +1213,7 @@ HTML_UI = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- BOTTOM NAV (3 CLEAN TABS: Studio, ငွေဖြည့်, Profile) -->
+  <!-- BOTTOM NAV -->
   <div class="fixed bottom-0 inset-x-0 bg-[#12131c]/95 backdrop-blur border-t border-gray-800 grid grid-cols-3 text-center py-2 text-[11px] font-bold z-30">
     <button onclick="showTab('studio')" id="nav-studio" class="nav-active flex flex-col items-center gap-0.5"><span>🎙️</span><span>Studio</span></button>
     <button onclick="showTab('plans')" id="nav-plans" class="text-gray-400 flex flex-col items-center gap-0.5"><span>💳</span><span>ငွေဖြည့်</span></button>
@@ -1364,7 +1367,7 @@ HTML_UI = """<!DOCTYPE html>
         const res = await fetch(`/api/voice-sample/${voiceKey}?user_id=${userId}&style=${state.speakingStyle}`);
         const rawText = await res.text();
         let data = {};
-        try { data = JSON.parse(rawText); } catch(e) { throw new Error(rawText); }
+        try { data = JSON.parse(rawText); } catch(e) { throw new Error("အသံနမူနာ ဖွင့်မရပါ"); }
         if (!res.ok) throw new Error(data.detail || "အသံနမူနာ ဖွင့်မရပါ");
         player.src = data.audio_url + "?t=" + Date.now();
         btn.innerText = "⏸";
@@ -1525,8 +1528,8 @@ HTML_UI = """<!DOCTYPE html>
         const res = await fetch("/api/auto-script", { method: "POST", body: fd });
         const rawText = await res.text();
         let data = {};
-        try { data = JSON.parse(rawText); } catch(e) { throw new Error(rawText); }
-        if (!res.ok) throw new Error(data.detail || "Error");
+        try { data = JSON.parse(rawText); } catch(e) { throw new Error("ဆာဗာ ချိတ်ဆက်မှု အမှားအယွင်း ဖြစ်ပေါ်နေပါသည်။"); }
+        if (!res.ok) throw new Error(data.detail || "စာသားထုတ်မရပါ");
         document.getElementById("recapScript").value = data.script;
         updateRecapCreditCalc();
       } catch (e) {
@@ -1537,6 +1540,7 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
+    // SMOOTH 1% TO 100% RENDER WITH REAL SERVER PROGRESS POLLING
     async function startRecapRender() {
       const file = document.getElementById("videoInput").files[0];
       const script = document.getElementById("recapScript").value.trim();
@@ -1548,21 +1552,42 @@ HTML_UI = """<!DOCTYPE html>
       const pctLabel = document.getElementById("renderPercentLabel");
       const statusMsg = document.getElementById("renderStatusMsg");
       const doneActions = document.getElementById("renderDoneActions");
+      const renderBtn = document.getElementById("mainRenderBtn");
 
       card.classList.remove("hidden");
       doneActions.classList.add("hidden");
+      renderBtn.disabled = true;
       card.scrollIntoView({ behavior: "smooth" });
 
-      let pct = 1;
-      const timer = setInterval(() => {
-        if (pct < 92) {
-          pct += Math.floor(Math.random() * 4) + 1;
-          if (pct > 92) pct = 92;
-          fill.style.width = pct + "%";
-          pctLabel.innerText = pct + "%";
-          statusMsg.innerText = `⏳ Video ကို Render လုပ်နေပါသည် (${pct}%)...`;
+      const clientJobId = "job_" + Math.random().toString(36).substring(2, 10);
+      let displayPct = 1;
+      fill.style.width = "1%";
+      pctLabel.innerText = "1%";
+      statusMsg.innerText = "⏳ Video ဖိုင်ကို ပေးပို့ပြင်ဆင်နေပါသည် (1%)...";
+
+      // Smoothly advance percentage while polling real backend stage
+      const pollTimer = setInterval(async () => {
+        try {
+          const pr = await fetch(`/api/job-progress/${clientJobId}`);
+          if (pr.ok) {
+            const pdata = await pr.json();
+            if (pdata.pct > displayPct) {
+              displayPct = pdata.pct;
+            } else if (displayPct < 98) {
+              displayPct += 1;
+            }
+            fill.style.width = displayPct + "%";
+            pctLabel.innerText = displayPct + "%";
+            if (pdata.msg) statusMsg.innerText = pdata.msg.replace(/\(\d+%\)/, `(${displayPct}%)`);
+          }
+        } catch (e) {
+          if (displayPct < 98) {
+            displayPct += 1;
+            fill.style.width = displayPct + "%";
+            pctLabel.innerText = displayPct + "%";
+          }
         }
-      }, 600);
+      }, 900);
 
       const cw = container.clientWidth || 300;
       const ch = container.clientHeight || 200;
@@ -1572,6 +1597,7 @@ HTML_UI = """<!DOCTYPE html>
       const boxH = Math.round((maskBox.offsetHeight / ch) * 100);
 
       const fd = new FormData();
+      fd.append("job_id", clientJobId);
       fd.append("user_id", userId);
       fd.append("script_text", script);
       fd.append("pov_mode", state.povMode);
@@ -1596,25 +1622,27 @@ HTML_UI = """<!DOCTYPE html>
         const res = await fetch("/api/render-recap", { method: "POST", body: fd });
         const rawText = await res.text();
         let data = {};
-        try { data = JSON.parse(rawText); } catch(e) { throw new Error(rawText); }
-        clearInterval(timer);
+        try { data = JSON.parse(rawText); } catch(e) { throw new Error("ဆာဗာမှ အချက်အလက် ပြန်ပို့ရာတွင် ချို့ယွင်းချက် ဖြစ်ပေါ်နေပါသည်။"); }
+        clearInterval(pollTimer);
         if (!res.ok) {
           if (res.status === 402) {
             alert(data.detail);
             showTab("plans");
           }
-          throw new Error(data.detail || "Render failed");
+          throw new Error(data.detail || "Video ထုတ်လုပ်မှု မအောင်မြင်ပါ။");
         }
 
         fill.style.width = "100%";
         pctLabel.innerText = "100%";
-        statusMsg.innerText = "🎉 Render 100% ပြီးစီးပါပြီ! အောက်က ခလုတ်ကို နှိပ်ပါ။";
+        statusMsg.innerText = "🎉 Video ထုတ်လုပ်မှု 100% ပြီးစီးပါပြီ! အောက်က ခလုတ်ကို နှိပ်ပါ။";
         state.lastVideoUrl = data.video_url;
         doneActions.classList.remove("hidden");
         loadUser();
       } catch (err) {
-        clearInterval(timer);
-        statusMsg.innerText = "❌ Error: " + err.message;
+        clearInterval(pollTimer);
+        statusMsg.innerText = "❌ အမှားအယွင်း: " + err.message;
+      } finally {
+        renderBtn.disabled = false;
       }
     }
 
@@ -1756,6 +1784,10 @@ async def serve_ui():
 async def api_user(user_id: int):
     return get_or_create_user(user_id)
 
+@app.get("/api/job-progress/{job_id}")
+async def api_job_progress(job_id: str):
+    return RENDER_JOBS.get(job_id, {"pct": 12, "msg": "⏳ Video ဖိုင်ကို လက်ခံစစ်ဆေးနေပါသည်..."})
+
 @app.get("/api/voice-sample/{voice_key}")
 async def api_voice_sample(voice_key: str, user_id: int = 1638781080, style: str = "movie_recap"):
     if voice_key == "cloned":
@@ -1773,7 +1805,7 @@ async def api_voice_sample(voice_key: str, user_id: int = 1638781080, style: str
             await generate_edge_tts(EDGE_VOICES[voice_key]["sample"], voice_key, style, 1.0, out_path)
         return {"audio_url": f"/{out_path}"}
 
-    raise HTTPException(status_code=404, detail="Voice not found")
+    raise HTTPException(status_code=404, detail="ရွေးချယ်ထားသော အသံကို မတွေ့ရှိပါ။")
 
 @app.post("/api/tts")
 async def api_tts(
@@ -1844,17 +1876,18 @@ async def api_auto_script(video: UploadFile = File(...), pov_mode: str = Form("a
             capture_output=True, text=True
         )
         if res.returncode != 0 or not os.path.exists(in_aud):
-            raise HTTPException(status_code=500, detail=f"Audio ခွဲထုတ်မရပါ: {res.stderr[-200:]}")
+            raise HTTPException(status_code=500, detail="Video မှ အသံခွဲထုတ်ရာတွင် အဆင်မပြေပါ။ နောက်တစ်ကြိမ် ထပ်စမ်းကြည့်ပါ။")
 
         script = call_gemini_script_gen(in_aud, vid_dur, pov_mode, speaking_style)
         return {"script": script}
     except HTTPException as he:
         raise he
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Auto Script Error: {str(e)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI စာသားဘာသာပြန်ရာတွင် ခေတ္တချို့ယွင်းနေပါသည်။ ထပ်မံကြိုးစားကြည့်ပါ။")
 
 @app.post("/api/render-recap")
 async def api_render_recap(
+    job_id: str = Form(""),
     user_id: int = Form(...),
     script_text: str = Form(...),
     pov_mode: str = Form("auto_duo"),
@@ -1875,9 +1908,12 @@ async def api_render_recap(
     resolution: str = Form("original"),
     video: UploadFile = File(...)
 ):
-    try:
-        user = get_or_create_user(user_id)
+    if not job_id:
         job_id = str(uuid.uuid4())[:8]
+
+    try:
+        RENDER_JOBS[job_id] = {"pct": 15, "msg": "⏳ Video ဖိုင်ကို စစ်ဆေးနေပါသည် (15%)..."}
+        user = get_or_create_user(user_id)
         in_vid = f"uploads/in_{job_id}_{video.filename}"
         synced_tts = f"outputs/recap_audio_{job_id}.mp3"
         out_vid = f"outputs/MovieMyanmarAi_{job_id}.mp4"
@@ -1905,6 +1941,7 @@ async def api_render_recap(
             sub_enabled == "1", sub_size, sub_color, user, user_id, job_id, synced_tts
         )
 
+        RENDER_JOBS[job_id] = {"pct": 68, "msg": "⏳ Video နှင့် မြန်မာစာတန်းထိုးများ ပေါင်းစပ်နေပါသည် (68%)..."}
         cmd = ["ffmpeg", "-y", "-i", in_vid, "-i", synced_tts]
         for _, _, p_path in png_overlays:
             cmd.extend(["-i", p_path])
@@ -1948,13 +1985,18 @@ async def api_render_recap(
             "-map", f"[{last_v}]", "-map", "[a]",
             "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", out_vid
         ])
+
+        RENDER_JOBS[job_id] = {"pct": 82, "msg": "⏳ နောက်ဆုံးအဆင့် Video Render ထုတ်နေပါသည် (82%)..."}
         subprocess.run(cmd, check=True)
 
+        RENDER_JOBS[job_id] = {"pct": 100, "msg": "✅ Video ထုတ်လုပ်မှု ပြီးစီးပါပြီ (100%)!"}
         return {"video_url": f"/{out_vid}"}
     except HTTPException as he:
+        RENDER_JOBS.pop(job_id, None)
         raise he
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Render Error: {str(e)}")
+    except Exception:
+        RENDER_JOBS.pop(job_id, None)
+        raise HTTPException(status_code=500, detail="Video ထုတ်လုပ်ရာတွင် မမျှော်လင့်သော အမှားအယွင်း ဖြစ်ပေါ်ခဲ့ပါသည်။ နောက်တစ်ကြိမ် ထပ်မံကြိုးစားကြည့်ပါ။")
 
 @app.post("/api/send-to-telegram")
 async def api_send_to_tg(user_id: int = Form(...), video_url: str = Form(...)):
