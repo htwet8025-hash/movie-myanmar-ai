@@ -170,7 +170,6 @@ def render_burmese_subtitle_png(text: str, vid_w: int, vid_h: int, sub_size: int
     except Exception:
         font = ImageFont.load_default()
 
-    # Wrap Burmese text cleanly to fit 88% of video width
     max_w = int(vid_w * 0.88)
     lines = []
     cur = ""
@@ -220,7 +219,6 @@ def render_burmese_subtitle_png(text: str, vid_w: int, vid_h: int, sub_size: int
                 radius=12, fill=bg_rgba
             )
 
-        # Draw crisp black outline so Burmese text is readable on any background
         outline_w = max(2, font_px // 14)
         for ox in range(-outline_w, outline_w + 1):
             for oy in range(-outline_w, outline_w + 1):
@@ -403,7 +401,6 @@ async def build_synced_dub_and_png_subs(
     total_spoken_text = "".join(pure_texts) if pure_texts else script_text.strip()
     credit_cost = calc_text_credits(total_spoken_text)
 
-    # DEDUCT CREDITS FOR ALL VOICES (20 CHARS = 1 CREDIT)
     if user["points"] < credit_cost:
         raise HTTPException(
             status_code=402,
@@ -412,7 +409,6 @@ async def build_synced_dub_and_png_subs(
 
     png_overlays = []
 
-    # Case 1: Continuous Movie Recap or plain text without timestamps
     if not segments:
         clean_txt = script_text.strip()
         raw_tts = f"outputs/raw_{job_id}.mp3"
@@ -447,7 +443,6 @@ async def build_synced_dub_and_png_subs(
 
         return png_overlays
 
-    # Case 2: Timestamp-synced dialogue segments
     clip_files = []
     for idx, (start_s, end_s, gender, txt) in enumerate(segments):
         seg_dur = max(0.8, end_s - start_s)
@@ -1885,7 +1880,6 @@ async def api_render_recap(
         vid_w, vid_h, vid_dur = get_video_info(in_vid)
         vid_has_audio = has_audio_stream(in_vid)
 
-        # Compute target output resolution for crisp Burmese PNG subtitles
         out_w, out_h = vid_w, vid_h
         if aspect_ratio == "9:16":
             out_w, out_h = 720, 1280
@@ -1903,7 +1897,6 @@ async def api_render_recap(
             sub_enabled == "1", sub_size, sub_color, user, user_id, job_id, synced_tts
         )
 
-        # Build FFmpeg command with PNG Burmese subtitle overlays (100% crisp Burmese script, zero boxes!)
         cmd = ["ffmpeg", "-y", "-i", in_vid, "-i", synced_tts]
         for _, _, p_path in png_overlays:
             cmd.extend(["-i", p_path])
@@ -1935,7 +1928,6 @@ async def api_render_recap(
             fc_parts.append(f"[{last_v}][{inp_idx}:v]overlay=0:0:enable='between(t,{st:.2f},{et:.2f})'[{next_v}]")
             last_v = next_v
 
-        # SMOOTH ORIGINAL BGM AUDIO MIXING (NO CHOPPY PHASE ARTIFACTS!)
         if orig_audio_mode == "bgm_only" and vid_has_audio:
             fc_parts.append(f"[0:a]lowpass=f=450,volume=0.22[bgm];[1:a]volume=1.45[fg];[bgm][fg]amix=inputs=2:duration=first:normalize=0[a]")
         elif orig_audio_mode == "low" and vid_has_audio:
