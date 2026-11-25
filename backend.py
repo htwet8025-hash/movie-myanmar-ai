@@ -2,13 +2,13 @@ import os
 import re
 import math
 import uuid
-import wave
 import base64
 import sqlite3
 import asyncio
 import subprocess
 import requests
 import edge_tts
+from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
@@ -26,6 +26,28 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 
 os.makedirs("outputs", exist_ok=True)
 os.makedirs("uploads", exist_ok=True)
+os.makedirs("fonts", exist_ok=True)
+
+# --- ENSURE REAL BURMESE FONT EXISTS FOR SUBTITLE RENDERING (NO MORE BOXES!) ---
+BURMESE_FONT_PATH = "fonts/NotoSansMyanmar-Bold.ttf"
+def ensure_burmese_font():
+    if not os.path.exists(BURMESE_FONT_PATH) or os.path.getsize(BURMESE_FONT_PATH) < 10000:
+        urls = [
+            "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansMyanmar/NotoSansMyanmar-Bold.ttf",
+            "https://github.com/google/fonts/raw/main/ofl/padauk/Padauk-Bold.ttf"
+        ]
+        for u in urls:
+            try:
+                r = requests.get(u, timeout=20)
+                if r.status_code == 200 and len(r.content) > 10000:
+                    with open(BURMESE_FONT_PATH, "wb") as f:
+                        f.write(r.content)
+                    print("Downloaded Burmese font successfully!")
+                    break
+            except Exception as e:
+                print(f"Font download retry: {e}")
+
+ensure_burmese_font()
 
 app = FastAPI(title="Movie Myanmar Ai")
 app.add_middleware(
@@ -89,16 +111,30 @@ def calc_text_credits(text: str) -> int:
     return max(1, math.ceil(clean_len / 20))
 
 # --- MEDIA HELPERS ---
-def get_media_duration(file_path: str) -> float:
+def get_video_info(file_path: str):
+    dur, w, h = 0.0, 720, 1280
     try:
         cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height:format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", file_path
         ]
         res = subprocess.run(cmd, capture_output=True, text=True)
-        return float(res.stdout.strip())
+        lines = [x.strip() for x in res.stdout.strip().splitlines() if x.strip()]
+        if len(lines) >= 3:
+            w, h, dur = int(lines[0]), int(lines[1]), float(lines[2])
     except Exception:
-        return 0.0
+        pass
+    if dur <= 0:
+        try:
+            r2 = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+                capture_output=True, text=True
+            )
+            dur = float(r2.stdout.strip())
+        except Exception:
+            pass
+    return w, h, dur
 
 def has_audio_stream(file_path: str) -> bool:
     try:
@@ -122,15 +158,81 @@ def parse_time_to_sec(t_str: str) -> float:
     except Exception:
         return 0.0
 
-def format_srt_time(sec: float) -> str:
-    sec = max(0.0, sec)
-    h = int(sec // 3600)
-    m = int((sec % 3600) // 60)
-    s = int(sec % 60)
-    ms = int((sec - int(sec)) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+# --- RENDER CRISP BURMESE SUBTITLE PNG IMAGE USING PILLOW ---
+def render_burmese_subtitle_png(text: str, vid_w: int, vid_h: int, sub_size: int, sub_color: str, out_png: str):
+    ensure_burmese_font()
+    img = Image.new("RGBA", (vid_w, vid_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
 
-# --- EDGE TTS (FREE) & SPEAKING STYLES (INCLUDING NEW MOVIE RECAP STYLE) ---
+    font_px = max(22, int((vid_w / 360.0) * sub_size))
+    try:
+        font = ImageFont.truetype(BURMESE_FONT_PATH, font_px)
+    except Exception:
+        font = ImageFont.load_default()
+
+    # Wrap Burmese text cleanly to fit 88% of video width
+    max_w = int(vid_w * 0.88)
+    lines = []
+    cur = ""
+    for ch in text:
+        test = cur + ch
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if (bbox[2] - bbox[0]) > max_w and cur:
+            lines.append(cur)
+            cur = ch
+        else:
+            cur = test
+    if cur:
+        lines.append(cur)
+
+    line_heights = []
+    line_widths = []
+    for ln in lines:
+        bb = draw.textbbox((0, 0), ln, font=font)
+        line_widths.append(bb[2] - bb[0])
+        line_heights.append((bb[3] - bb[1]) + int(font_px * 0.35))
+
+    total_h = sum(line_heights)
+    y_cursor = int(vid_h * 0.82) - (total_h // 2)
+    y_cursor = max(20, min(vid_h - total_h - 30, y_cursor))
+
+    color_map = {
+        "clean": ((255, 220, 60, 255), None),
+        "sunny": ((255, 240, 80, 255), None),
+        "calm": ((125, 211, 252, 255), None),
+        "soft_glow": ((52, 211, 153, 255), None),
+        "bold_pop": ((255, 255, 255, 255), (37, 99, 235, 220)),
+        "box": ((255, 220, 80, 255), (0, 0, 0, 200)),
+        "punch": ((255, 255, 255, 255), (220, 38, 38, 220)),
+        "candy": ((255, 255, 255, 255), (219, 39, 119, 220)),
+    }
+    fill_rgba, bg_rgba = color_map.get(sub_color, ((255, 255, 255, 255), (0, 0, 0, 170)))
+
+    for i, ln in enumerate(lines):
+        lw = line_widths[i]
+        lh = line_heights[i]
+        x_pos = (vid_w - lw) // 2
+
+        if bg_rgba:
+            pad_x, pad_y = 14, 6
+            draw.rounded_rectangle(
+                [x_pos - pad_x, y_cursor - pad_y, x_pos + lw + pad_x, y_cursor + lh - 4],
+                radius=12, fill=bg_rgba
+            )
+
+        # Draw crisp black outline so Burmese text is readable on any background
+        outline_w = max(2, font_px // 14)
+        for ox in range(-outline_w, outline_w + 1):
+            for oy in range(-outline_w, outline_w + 1):
+                if ox != 0 or oy != 0:
+                    draw.text((x_pos + ox, y_cursor + oy), ln, font=font, fill=(0, 0, 0, 255))
+
+        draw.text((x_pos, y_cursor), ln, font=font, fill=fill_rgba)
+        y_cursor += lh
+
+    img.save(out_png, "PNG")
+
+# --- EDGE VOICES & SPEAKING STYLES ---
 EDGE_VOICES = {
     "edge_nilar": {
         "voice": "my-MM-NilarNeural",
@@ -168,63 +270,6 @@ async def generate_edge_tts(text: str, voice_key: str, style_key: str, speed_mul
     )
     await communicate.save(out_path)
 
-# --- GOOGLE GEMINI VOICES ---
-GOOGLE_VOICES = {
-    "google_Kore": {"name": "Kore", "sample": "မင်္ဂလာပါရှင်။ ကျွန်မကတော့ တည်ငြိမ်တဲ့ အသံပိုင်ရှင် Kore ဖြစ်ပါတယ်။"},
-    "google_Aoede": {"name": "Aoede", "sample": "မင်္ဂလာပါရှင်။ ပေါ့ပေါ့ပါးပါးနဲ့ နားထောင်လို့ကောင်းမယ့် Aoede အသံ ဖြစ်ပါတယ်။"},
-    "google_Leda": {"name": "Leda", "sample": "မင်္ဂလာပါရှင်။ နုပျိုလန်းဆန်းတဲ့ အသံပိုင်ရှင် Leda ဖြစ်ပါတယ်။"},
-    "google_Puck": {"name": "Puck", "sample": "မင်္ဂလာပါခင်ဗျာ။ တက်တက်ကြွကြွနဲ့ တင်ဆက်ပေးမယ့် Puck အသံ ဖြစ်ပါတယ်။"},
-    "google_Charon": {"name": "Charon", "sample": "မင်္ဂလာပါခင်ဗျာ။ လေးနက်တည်ကြည်တဲ့ အသံပိုင်ရှင် Charon ဖြစ်ပါတယ်။"},
-    "google_Fenrir": {"name": "Fenrir", "sample": "မင်္ဂလာပါခင်ဗျာ။ စိတ်လှုပ်ရှားစရာ ဇာတ်ဝင်ခန်းတွေကို ပြောပြပေးမယ့် Fenrir ဖြစ်ပါတယ်။"}
-}
-
-def generate_google_gemini_tts(text: str, google_voice_name: str, style_key: str, out_path: str):
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။ Free Edge အသံများကို သုံးနိုင်ပါသည်။")
-
-    style_desc = {
-        "movie_recap": "fast-paced, punchy, exciting Burmese TikTok/YouTube movie recap narrator tone",
-        "storytelling": "natural Burmese dialogue and storytelling tone",
-        "thriller": "suspenseful, mysterious, dramatic thriller tone",
-        "calm": "calm, soothing, gentle tone",
-        "energetic": "energetic, fast-paced, lively tone",
-        "original": "natural neutral Burmese speaking tone"
-    }.get(style_key, "fast-paced Burmese movie recap narrator tone")
-
-    prompt = f"Read the following Burmese line aloud in a {style_desc}. Speak clearly in Burmese:\n\n{text}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {
-                    "prebuiltVoiceConfig": {"voiceName": google_voice_name}
-                }
-            }
-        }
-    }
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={GEMINI_API_KEY}"
-    res = requests.post(url, json=payload, timeout=60)
-    if res.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"Google Voice Error ({res.status_code}): {res.text[:200]}")
-
-    data = res.json()
-    try:
-        b64_audio = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-        pcm_bytes = base64.b64decode(b64_audio)
-        tmp_wav = out_path + ".wav"
-        with wave.open(tmp_wav, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(24000)
-            wf.writeframes(pcm_bytes)
-        subprocess.run(["ffmpeg", "-y", "-i", tmp_wav, "-acodec", "libmp3lame", out_path], check=True)
-        if os.path.exists(tmp_wav):
-            os.remove(tmp_wav)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Google Audio Decode Error: {str(e)}")
-
 # --- VOICE CLONING ---
 def clone_voice_elevenlabs(user_id: int, voice_name: str, file_path: str):
     if not ELEVENLABS_API_KEY:
@@ -255,11 +300,11 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
     }
     res = requests.post(url, headers=headers, json=payload)
     if res.status_code != 200:
-        raise HTTPException(status_code=400, detail="Cloned Voice အသံထုတ်မရပါ။ Free အသံများကို ပြောင်းသုံးပါ။")
+        raise HTTPException(status_code=400, detail="Cloned Voice အသံထုတ်မရပါ။ Nilar သို့မဟုတ် Thiha ကို ပြောင်းသုံးပါ။")
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- FAST AUTO TRANSLATE (SUPPORTS BOTH DIALOGUE SYNC & MOVIE RECAP NARRATION) ---
+# --- FAST AUTO TRANSLATE ---
 def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, speaking_style: str) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။")
@@ -267,8 +312,7 @@ def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, 
     with open(audio_path, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    # If user picked Movie Recap style, generate punchy continuous Burmese Movie Recap narration like the sample video
-    if speaking_style == "movie_recap":
+    if speaking_style == "movie_recap" and pov_mode != "auto_duo":
         target_chars = max(60, int(duration_sec * 17)) if duration_sec > 0 else 300
         prompt = (
             f"Listen to this video audio (duration: {duration_sec:.1f} seconds). "
@@ -279,17 +323,18 @@ def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, 
         )
     else:
         pov_instruction = {
-            "direct": "Translate ONLY when characters actually speak. Keep exact dialogue POV (natural conversational Burmese).",
-            "third": "Narrate or translate ONLY during speech segments in natural Third-Person Burmese style.",
-            "first": "Translate/dub ONLY during speech segments in natural First-Person conversational Burmese style."
+            "auto_duo": "Identify Male [M] and Female [F] speakers accurately for natural back-and-forth Burmese conversation dubbing.",
+            "direct": "Translate ONLY when characters actually speak. Keep exact dialogue POV in natural conversational Burmese.",
+            "third": "Narrate ONLY during speech segments in natural Third-Person Burmese style.",
+            "first": "Dub ONLY during speech segments in natural First-Person conversational Burmese style."
         }.get(pov_mode, "Translate ONLY when characters speak into natural conversational Burmese.")
 
         prompt = (
             f"Listen carefully to this audio (total duration: {duration_sec:.1f} seconds). "
-            f"Detect ONLY the exact time segments where people are actually speaking! Do NOT generate speech during silent pauses or music-only gaps. "
-            f"Identify speaker gender ([M] for Male, [F] for Female) for natural back-and-forth dialogue dubbing. "
+            f"Detect ONLY the exact time segments where people are actually speaking! Do NOT generate speech during silent pauses. "
+            f"Identify speaker gender ([M] for Male, [F] for Female). "
             f"{pov_instruction} "
-            f"Keep each Burmese line concise (~14 Burmese characters per second of that segment) so the Burmese voice fits naturally inside that exact time window. "
+            f"Keep each Burmese line concise (~14 Burmese characters per second of that segment). "
             f"Format EVERY spoken segment strictly on its own line like this:\n"
             f"[00:02 - 00:06] [M] မင်း ဒီကို ဘာလာလုပ်တာလဲ။\n"
             f"[00:08 - 00:12] [F] ကျွန်မ ရှင့်ကို လာရှာတာပါ။\n"
@@ -323,18 +368,23 @@ def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, 
 
     raise HTTPException(status_code=500, detail=f"Gemini Error: {last_err}")
 
-# --- BUILD SYNCED DUBBING / RECAP AUDIO + SRT SUBTITLES ---
-async def build_synced_dub_and_srt(
+# --- BUILD SYNCED DUBBING AUDIO + PNG SUBTITLE TIMELINE ---
+async def build_synced_dub_and_png_subs(
     script_text: str,
+    vid_w: int,
+    vid_h: int,
     vid_dur: float,
+    pov_mode: str,
     voice_type: str,
     speaking_style: str,
     speed: float,
+    sub_enabled: bool,
+    sub_size: int,
+    sub_color: str,
     user: dict,
     user_id: int,
     job_id: str,
-    final_audio_out: str,
-    srt_out: str
+    final_audio_out: str
 ):
     pattern = re.compile(r"\[(\d{1,2}:\d{2}(?:\.\d+)?)\s*-\s*(\d{1,2}:\d{2}(?:\.\d+)?)\]\s*(?:\[(M|F)\])?\s*(.+)")
     segments = []
@@ -353,25 +403,28 @@ async def build_synced_dub_and_srt(
     total_spoken_text = "".join(pure_texts) if pure_texts else script_text.strip()
     credit_cost = calc_text_credits(total_spoken_text)
 
-    # Continuous Movie Recap mode or plain text without timestamps
+    # DEDUCT CREDITS FOR ALL VOICES (20 CHARS = 1 CREDIT)
+    if user["points"] < credit_cost:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပြီး လက်ကျန် {user['points']} Credit သာရှိပါသည်)။ ငွေဖြည့်ပါခင်ဗျာ။"
+        )
+
+    png_overlays = []
+
+    # Case 1: Continuous Movie Recap or plain text without timestamps
     if not segments:
         clean_txt = script_text.strip()
         raw_tts = f"outputs/raw_{job_id}.mp3"
         if voice_type == "cloned":
-            if user["points"] < credit_cost:
-                raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
             if not user["cloned_voice_id"]:
                 raise HTTPException(status_code=400, detail="အသံတူပွား (Voice Clone) အရင်ဖန်တီးပါ။")
             generate_cloned_tts(clean_txt, user["cloned_voice_id"], raw_tts)
-            update_points(user_id, -credit_cost)
-        elif voice_type in GOOGLE_VOICES:
-            if user["points"] < credit_cost:
-                raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
-            generate_google_gemini_tts(clean_txt, GOOGLE_VOICES[voice_type]["name"], speaking_style, raw_tts)
-            update_points(user_id, -credit_cost)
         else:
             v_key = voice_type if voice_type in EDGE_VOICES else "edge_thiha"
             await generate_edge_tts(clean_txt, v_key, speaking_style, speed, raw_tts)
+
+        update_points(user_id, -credit_cost)
 
         tts_dur = get_media_duration(raw_tts)
         if vid_dur > 0 and tts_dur > 0:
@@ -380,42 +433,34 @@ async def build_synced_dub_and_srt(
         else:
             subprocess.run(["ffmpeg", "-y", "-i", raw_tts, final_audio_out], check=True)
 
-        # Split sentences into clean SRT chunks across the video
-        sentences = [s.strip() for s in re.split(r"[။\n]+", clean_txt) if s.strip()]
-        if not sentences:
-            sentences = [clean_txt]
-        chunk_dur = max(1.5, (vid_dur if vid_dur > 0 else len(sentences) * 3) / len(sentences))
-        srt_blocks = []
-        for idx, sent in enumerate(sentences):
-            st = idx * chunk_dur
-            et = min(vid_dur if vid_dur > 0 else (idx + 1) * chunk_dur, (idx + 1) * chunk_dur)
-            srt_blocks.append(f"{idx + 1}\n{format_srt_time(st)} --> {format_srt_time(et)}\n{sent}\n")
-        with open(srt_out, "w", encoding="utf-8") as sf:
-            sf.write("\n".join(srt_blocks))
-        return
+        if sub_enabled:
+            sentences = [s.strip() for s in re.split(r"[။\n]+", clean_txt) if s.strip()]
+            if not sentences:
+                sentences = [clean_txt]
+            chunk_dur = max(1.5, (vid_dur if vid_dur > 0 else len(sentences) * 3) / len(sentences))
+            for idx, sent in enumerate(sentences):
+                st = idx * chunk_dur
+                et = min(vid_dur if vid_dur > 0 else (idx + 1) * chunk_dur, (idx + 1) * chunk_dur)
+                png_path = f"outputs/sub_{job_id}_{idx}.png"
+                render_burmese_subtitle_png(sent, vid_w, vid_h, sub_size, sub_color, png_path)
+                png_overlays.append((st, et, png_path))
 
-    # Timestamp-synced dialogue mode
-    if voice_type in ["cloned"] or voice_type in GOOGLE_VOICES:
-        if user["points"] < credit_cost:
-            raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
+        return png_overlays
 
+    # Case 2: Timestamp-synced dialogue segments
     clip_files = []
-    srt_lines = []
-
     for idx, (start_s, end_s, gender, txt) in enumerate(segments):
         seg_dur = max(0.8, end_s - start_s)
         raw_clip = f"outputs/seg_raw_{job_id}_{idx}.mp3"
         fit_clip = f"outputs/seg_fit_{job_id}_{idx}.mp3"
 
-        if voice_type == "auto_duo":
+        if voice_type == "cloned" and user["cloned_voice_id"]:
+            generate_cloned_tts(txt, user["cloned_voice_id"], raw_clip)
+        elif pov_mode == "auto_duo":
             chosen_voice = "edge_nilar" if gender == "F" else "edge_thiha"
             await generate_edge_tts(txt, chosen_voice, speaking_style, speed, raw_clip)
-        elif voice_type == "cloned" and user["cloned_voice_id"]:
-            generate_cloned_tts(txt, user["cloned_voice_id"], raw_clip)
-        elif voice_type in GOOGLE_VOICES:
-            generate_google_gemini_tts(txt, GOOGLE_VOICES[voice_type]["name"], speaking_style, raw_clip)
         else:
-            chosen_voice = voice_type if voice_type in EDGE_VOICES else ("edge_nilar" if gender == "F" else "edge_thiha")
+            chosen_voice = voice_type if voice_type in EDGE_VOICES else "edge_thiha"
             await generate_edge_tts(txt, chosen_voice, speaking_style, speed, raw_clip)
 
         clip_dur = get_media_duration(raw_clip)
@@ -426,13 +471,13 @@ async def build_synced_dub_and_srt(
             fit_clip = raw_clip
 
         clip_files.append((start_s, fit_clip))
-        srt_lines.append(f"{idx + 1}\n{format_srt_time(start_s)} --> {format_srt_time(end_s)}\n{txt}\n")
 
-    if voice_type in ["cloned"] or voice_type in GOOGLE_VOICES:
-        update_points(user_id, -credit_cost)
+        if sub_enabled:
+            png_path = f"outputs/sub_{job_id}_{idx}.png"
+            render_burmese_subtitle_png(txt, vid_w, vid_h, sub_size, sub_color, png_path)
+            png_overlays.append((start_s, end_s, png_path))
 
-    with open(srt_out, "w", encoding="utf-8") as sf:
-        sf.write("\n".join(srt_lines))
+    update_points(user_id, -credit_cost)
 
     total_dur = max(vid_dur, segments[-1][1] + 0.5)
     cmd = ["ffmpeg", "-y", "-f", "lavfi", "-t", f"{total_dur:.3f}", "-i", "anullsrc=r=24000:cl=mono"]
@@ -448,6 +493,8 @@ async def build_synced_dub_and_srt(
     filter_parts.append(f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:normalize=0[outa]")
     cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", "[outa]", "-acodec", "libmp3lame", final_audio_out])
     subprocess.run(cmd, check=True)
+
+    return png_overlays
 
 # --- TELEGRAM BOT ---
 tg_app = Application.builder().token(BOT_TOKEN).build() if BOT_TOKEN else None
@@ -521,7 +568,7 @@ async def start_telegram_bot():
 async def on_startup():
     asyncio.create_task(start_telegram_bot())
 
-# --- FULL PRO UI (NO EARN TAB, UABPay ADDED, MOVIE RECAP STYLE ADDED) ---
+# --- FULL PRO UI ---
 HTML_UI = """<!DOCTYPE html>
 <html lang="my">
 <head>
@@ -575,7 +622,7 @@ HTML_UI = """<!DOCTYPE html>
         ကိုယ်ပိုင်အသံနဲ့ <span class="grad-text">စကားပြောစေမယ်</span>
       </h2>
       <p class="text-xs text-gray-400 leading-relaxed">
-        စာသားအလုံး ၂၀ လျှင် 1 Credit (၁ လုံး = 0.05 Credit) · Free အသံများ အခမဲ့
+        စာသားအလုံး ၂၀ လျှင် 1 Credit (၁ လုံး = 0.05 Credit) · မြန်မာစာတန်း အမှန်ထိုးပေးမယ်
       </p>
       <div class="flex items-center justify-between h-8 pt-2 px-1 opacity-90" id="waveformBox"></div>
     </div>
@@ -657,7 +704,7 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- BACKGROUND AUDIO / VOCAL REMOVAL MODE -->
+        <!-- BACKGROUND AUDIO / VOCAL REMOVAL MODE (SMOOTH & CLEAN) -->
         <div class="space-y-1.5">
           <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">🎧 မူရင်း Video အသံ စီမံခန့်ခွဲမှု</div>
           <div class="grid grid-cols-3 gap-1.5 text-center text-[11px]">
@@ -784,15 +831,20 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- STEP 1: NARRATION POV STYLE -->
+        <!-- STEP 1: NARRATION POV STYLE (INCLUDES AUTO ကျား/မ အပြန်အလှန်ပြော) -->
         <div class="space-y-2 pt-2 border-t border-gray-800">
           <div class="text-xs font-extrabold text-amber-400 tracking-wide">① မြန်မာဘာသာပြန် SCRIPT</div>
           <div class="text-xs font-bold text-gray-300">ဇာတ်ကြောင်းပုံစံ</div>
 
           <div class="space-y-2">
-            <div onclick="selectPov('direct', this)" class="pov-card p-3.5 rounded-2xl grad-pill cursor-pointer shadow-lg">
-              <div class="font-extrabold text-sm text-gray-950">Direct Translation</div>
-              <div class="text-xs text-gray-900 font-semibold mt-1">မူရင်း POV နှင့် အဓိပ္ပာယ်ကို မပြောင်းဘဲ ဇာတ်ကောင်စကားပြောသလို ဘာသာပြန်မယ်</div>
+            <div onclick="selectPov('auto_duo', this)" class="pov-card p-3.5 rounded-2xl grad-pill cursor-pointer shadow-lg">
+              <div class="font-extrabold text-sm text-gray-950">🎭 Auto ကျား/မ အပြန်အလှန်ပြော (Thiha + Nilar)</div>
+              <div class="text-xs text-gray-900 font-semibold mt-1">ယောက်ျားလေးပြောရင် သီဟ၊ မိန်းကလေးပြောရင် နီလာ အသံအလိုအလျောက် ပြောင်းပြောပေးမယ်</div>
+            </div>
+
+            <div onclick="selectPov('direct', this)" class="pov-card p-3.5 rounded-2xl bg-[#1e2030] border border-gray-800 cursor-pointer">
+              <div class="font-bold text-sm text-white">Direct Translation</div>
+              <div class="text-xs text-gray-400 mt-1">မူရင်း POV နှင့် အဓိပ္ပာယ်ကို မပြောင်းဘဲ ဇာတ်ကောင်စကားပြောသလို ဘာသာပြန်မယ်</div>
             </div>
 
             <div onclick="selectPov('third', this)" class="pov-card p-3.5 rounded-2xl bg-[#1e2030] border border-gray-800 cursor-pointer">
@@ -823,7 +875,7 @@ HTML_UI = """<!DOCTYPE html>
             </div>
             <div class="text-right">
               <span class="text-gray-400 block text-[10px]">ကျသင့်မည့် Credit</span>
-              <span id="recapCreditCost" class="font-extrabold text-emerald-400 text-xs">0 Credit</span>
+              <span id="recapCreditCost" class="font-extrabold text-amber-400 text-xs">0 Credit</span>
             </div>
           </div>
         </div>
@@ -854,17 +906,16 @@ HTML_UI = """<!DOCTYPE html>
           <span class="text-gray-300 font-bold">💰 စုစုပေါင်း ကျသင့်မည့် Credit:</span>
           <span class="font-extrabold text-amber-400 text-sm"><span id="ttsCreditCost">0</span> Credit</span>
         </div>
-        <p class="text-[10px] text-gray-400 pt-0.5">* Free Edge အသံ (Nilar / Thiha) ကို ရွေးထားပါက Credit မနုတ်ဘဲ အခမဲ့ ထုတ်ပေးပါမည်။ Premium / Voice Clone အတွက် 20 လုံးလျှင် 1 Credit နုတ်ယူပါမည်။</p>
       </div>
 
       <button onclick="runTtsOnly()" id="ttsOnlyBtn" class="w-full py-3.5 rounded-xl grad-btn text-sm shadow-lg">🔊 အသံဖိုင် ထုတ်မည်</button>
       <audio id="ttsOnlyAudio" controls class="w-full hidden"></audio>
     </div>
 
-    <!-- VOICEOVER SELECTION -->
+    <!-- VOICEOVER SELECTION (CLEAN: ONLY NILAR, THIHA, & CLONED VOICE) -->
     <div class="card-dark rounded-2xl p-4 space-y-3">
       <div class="flex justify-between items-center">
-        <div class="text-xs font-extrabold text-amber-400 tracking-wide">② VOICEOVER အသံ</div>
+        <div class="text-xs font-extrabold text-amber-400 tracking-wide">② VOICEOVER အသံ (အလုံး 20 = 1 Credit)</div>
         <button onclick="document.getElementById('cloneModal').classList.remove('hidden')" class="text-[11px] bg-purple-600/30 border border-purple-400/50 text-purple-200 px-2.5 py-1.5 rounded-xl font-bold">
           + Voice Clone (MP3/MP4)
         </button>
@@ -872,67 +923,30 @@ HTML_UI = """<!DOCTYPE html>
 
       <audio id="samplePreviewPlayer" class="hidden"></audio>
 
-      <div class="text-[11px] font-bold text-emerald-400">✨ အပြန်အလှန် စကားပြောစနစ် (Free)</div>
-      <div onclick="selectVoice('auto_duo', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border-2 border-amber-400 flex items-center justify-between cursor-pointer">
-        <div>
-          <span class="font-bold text-amber-300 text-xs">🎭 Auto ကျား/မ အပြန်အလှန်ပြော (Thiha + Nilar)</span>
-          <p class="text-[10px] text-gray-300 mt-0.5">ယောက်ျားလေးပြောရင် သီဟ၊ မိန်းကလေးပြောရင် နီလာ အသံအလိုအလျောက် ပြောင်းပြောပေးမည် (0 Credit)</p>
-        </div>
-        <button type="button" onclick="playVoiceSample(event, 'edge_thiha', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold shrink-0">▶</button>
-      </div>
-
-      <div class="text-[11px] font-bold text-gray-400 pt-1">Edge အသံ — အခမဲ့ (0 Credit)</div>
       <div class="space-y-2 text-xs">
-        <div onclick="selectVoice('edge_nilar', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-white">Nilar - မိန်းကလေး <span class="text-[10px] text-emerald-400 ml-1">(Free)</span></span>
+        <div onclick="selectVoice('edge_nilar', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border-2 border-amber-400 flex items-center justify-between cursor-pointer">
+          <span class="font-bold text-white">Nilar - မိန်းကလေး</span>
           <button type="button" onclick="playVoiceSample(event, 'edge_nilar', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
         </div>
 
         <div onclick="selectVoice('edge_thiha', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-white">Thiha - ယောက်ျားလေး <span class="text-[10px] text-emerald-400 ml-1">(Free)</span></span>
+          <span class="font-bold text-white">Thiha - ယောက်ျားလေး</span>
           <button type="button" onclick="playVoiceSample(event, 'edge_thiha', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
         </div>
-      </div>
 
-      <div class="text-[11px] font-bold text-gray-400 pt-1">Google & Voice Clone — စာလုံး 20 လျှင် 1 Credit</div>
-      <div class="space-y-2 text-xs">
-        <div onclick="selectVoice('google_Kore', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-white">Kore - မိန်းကလေး (တည်ငြိမ်)</span>
-          <button type="button" onclick="playVoiceSample(event, 'google_Kore', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
-        </div>
-        <div onclick="selectVoice('google_Aoede', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-white">Aoede - မိန်းကလေး (ပေါ့ပါး)</span>
-          <button type="button" onclick="playVoiceSample(event, 'google_Aoede', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
-        </div>
-        <div onclick="selectVoice('google_Leda', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-white">Leda - မိန်းကလေး (နုပျို)</span>
-          <button type="button" onclick="playVoiceSample(event, 'google_Leda', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
-        </div>
-        <div onclick="selectVoice('google_Puck', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-white">Puck - ယောက်ျားလေး (တက်ကြွ)</span>
-          <button type="button" onclick="playVoiceSample(event, 'google_Puck', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
-        </div>
-        <div onclick="selectVoice('google_Charon', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-white">Charon - ယောက်ျားလေး (လေးနက်)</span>
-          <button type="button" onclick="playVoiceSample(event, 'google_Charon', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
-        </div>
-        <div onclick="selectVoice('google_Fenrir', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-white">Fenrir - ယောက်ျားလေး (စိတ်လှုပ်ရှား)</span>
-          <button type="button" onclick="playVoiceSample(event, 'google_Fenrir', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
-        </div>
         <div onclick="selectVoice('cloned', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
           <span class="font-bold text-amber-300">⭐ My Cloned Voice (အသံတူပွား)</span>
           <button type="button" onclick="playVoiceSample(event, 'cloned', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
         </div>
       </div>
 
-      <!-- SPEAKING STYLE (INCLUDES NEW MOVIE RECAP NARRATION STYLE FROM VIDEO) -->
+      <!-- SPEAKING STYLE -->
       <div class="pt-2 border-t border-gray-800 space-y-2">
         <div class="text-xs font-extrabold text-amber-400">🎙️ ပြောဟန် (Thiha / Nilar)</div>
         <div class="grid grid-cols-2 gap-2 text-xs">
           <div onclick="selectStyle('movie_recap', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border-2 border-amber-400 cursor-pointer col-span-2">
             <div class="font-bold text-amber-300">🎬 Movie Recap (ဇာတ်ကားပြန်ပြောဟန် 🔥)</div>
-            <div class="text-[10px] text-gray-300 mt-0.5">သွက်သွက်လက်လက် အရှိန်အဟုန်နဲ့ စိတ်ဝင်စားဖွယ် ပြန်ပြောပြဟန် (Video နမူနာပုံစံ)</div>
+            <div class="text-[10px] text-gray-300 mt-0.5">သွက်သွက်လက်လက် အရှိန်အဟုန်နဲ့ စိတ်ဝင်စားဖွယ် ပြန်ပြောပြဟန်</div>
           </div>
           <div onclick="selectStyle('storytelling', this)" class="style-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 cursor-pointer">
             <div class="font-bold text-white">ပုံပြင်/ဇာတ်ကြောင်းပြော</div>
@@ -1219,8 +1233,8 @@ HTML_UI = """<!DOCTYPE html>
     });
 
     let state = {
-      povMode: "direct",
-      voice: "auto_duo",
+      povMode: "auto_duo",
+      voice: "edge_nilar",
       speakingStyle: "movie_recap",
       speed: 1.0,
       maskMode: "blur",
@@ -1257,8 +1271,7 @@ HTML_UI = """<!DOCTYPE html>
       const txt = document.getElementById("ttsOnlyText").value;
       const info = calcCredits(txt);
       document.getElementById("ttsCharCount").innerText = info.len;
-      const isFree = ["auto_duo", "edge_nilar", "edge_thiha"].includes(state.voice);
-      document.getElementById("ttsCreditCost").innerText = isFree ? `0 (Free အသံ) / Premium ဆိုလျှင် ${info.credits}` : info.credits;
+      document.getElementById("ttsCreditCost").innerText = info.credits;
     }
 
     function updateRecapCreditCalc() {
@@ -1266,8 +1279,7 @@ HTML_UI = """<!DOCTYPE html>
       const clean = txt.replace(/\[\d{1,2}:\d{2}(?:\.\d+)?\s*-\s*\d{1,2}:\d{2}(?:\.\d+)?\]\s*(?:\[[MF]\])?/g, "").trim();
       const info = calcCredits(clean);
       document.getElementById("recapCharCount").innerText = info.len;
-      const isFree = ["auto_duo", "edge_nilar", "edge_thiha"].includes(state.voice);
-      document.getElementById("recapCreditCost").innerText = isFree ? `0 Credit (Free အသံ)` : `${info.credits} Credits`;
+      document.getElementById("recapCreditCost").innerText = `${info.credits} Credits`;
     }
 
     function showTab(tab) {
@@ -1319,8 +1331,6 @@ HTML_UI = """<!DOCTYPE html>
       });
       el.classList.remove("border", "border-gray-800");
       el.classList.add("border-2", "border-amber-400");
-      updateTtsCreditCalc();
-      updateRecapCreditCalc();
     }
 
     function selectStyle(st, el) {
@@ -1561,6 +1571,7 @@ HTML_UI = """<!DOCTYPE html>
       const fd = new FormData();
       fd.append("user_id", userId);
       fd.append("script_text", script);
+      fd.append("pov_mode", state.povMode);
       fd.append("voice_type", state.voice);
       fd.append("speaking_style", state.speakingStyle);
       fd.append("speed", state.speed);
@@ -1759,13 +1770,6 @@ async def api_voice_sample(voice_key: str, user_id: int = 1638781080, style: str
             await generate_edge_tts(EDGE_VOICES[voice_key]["sample"], voice_key, style, 1.0, out_path)
         return {"audio_url": f"/{out_path}"}
 
-    if voice_key in GOOGLE_VOICES:
-        g_cfg = GOOGLE_VOICES[voice_key]
-        out_path = f"outputs/sample_{voice_key}.mp3"
-        if not os.path.exists(out_path):
-            generate_google_gemini_tts(g_cfg["sample"], g_cfg["name"], "movie_recap", out_path)
-        return {"audio_url": f"/{out_path}"}
-
     raise HTTPException(status_code=404, detail="Voice not found")
 
 @app.post("/api/tts")
@@ -1781,22 +1785,21 @@ async def api_tts(
     out_path = f"outputs/tts_{file_id}.mp3"
     credit_cost = calc_text_credits(text)
 
+    if user["points"] < credit_cost:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပြီး လက်ကျန် {user['points']} Credit သာရှိပါသည်)။ ငွေဖြည့်ပါခင်ဗျာ။"
+        )
+
     if voice_type == "cloned":
-        if user["points"] < credit_cost:
-            raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
         if not user["cloned_voice_id"]:
             raise HTTPException(status_code=400, detail="အသံတူပွား (Voice Clone) အရင်ဖန်တီးပါ။")
         generate_cloned_tts(text, user["cloned_voice_id"], out_path)
-        update_points(user_id, -credit_cost)
-    elif voice_type in GOOGLE_VOICES:
-        if user["points"] < credit_cost:
-            raise HTTPException(status_code=402, detail=f"Credit မလုံလောက်ပါ ({credit_cost} Credits လိုအပ်ပါသည်)။ ငွေဖြည့်ပါ (သို့) Free Edge အသံ ပြောင်းသုံးပါ။")
-        generate_google_gemini_tts(text, GOOGLE_VOICES[voice_type]["name"], speaking_style, out_path)
-        update_points(user_id, -credit_cost)
     else:
         v_key = voice_type if voice_type in EDGE_VOICES else "edge_thiha"
         await generate_edge_tts(text, v_key, speaking_style, speed, out_path)
 
+    update_points(user_id, -credit_cost)
     return {"audio_url": f"/outputs/tts_{file_id}.mp3"}
 
 @app.post("/api/clone-voice")
@@ -1820,7 +1823,7 @@ async def api_clone_voice(user_id: int = Form(...), voice_name: str = Form(...),
     return {"status": "success", "voice_id": voice_id}
 
 @app.post("/api/auto-script")
-async def api_auto_script(video: UploadFile = File(...), pov_mode: str = Form("direct"), speaking_style: str = Form("movie_recap")):
+async def api_auto_script(video: UploadFile = File(...), pov_mode: str = Form("auto_duo"), speaking_style: str = Form("movie_recap")):
     job_id = str(uuid.uuid4())[:8]
     in_vid = f"uploads/tmp_{job_id}_{video.filename}"
     in_aud = f"uploads/tmp_{job_id}.mp3"
@@ -1832,7 +1835,7 @@ async def api_auto_script(video: UploadFile = File(...), pov_mode: str = Form("d
         if not has_audio_stream(in_vid):
             raise HTTPException(status_code=400, detail="ဤ Video ဖိုင်ထဲတွင် စကားပြောအသံ (Audio) လုံးဝ မပါဝင်ပါ။ မြန်မာစာသားကို ကိုယ်တိုင် ရိုက်ထည့်ပေးပါ။")
 
-        vid_dur = get_media_duration(in_vid)
+        _, _, vid_dur = get_video_info(in_vid)
         res = subprocess.run(
             ["ffmpeg", "-y", "-i", in_vid, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", in_aud],
             capture_output=True, text=True
@@ -1851,7 +1854,8 @@ async def api_auto_script(video: UploadFile = File(...), pov_mode: str = Form("d
 async def api_render_recap(
     user_id: int = Form(...),
     script_text: str = Form(...),
-    voice_type: str = Form("auto_duo"),
+    pov_mode: str = Form("auto_duo"),
+    voice_type: str = Form("edge_nilar"),
     speaking_style: str = Form("movie_recap"),
     speed: float = Form(1.0),
     mask_mode: str = Form("blur"),
@@ -1873,66 +1877,77 @@ async def api_render_recap(
         job_id = str(uuid.uuid4())[:8]
         in_vid = f"uploads/in_{job_id}_{video.filename}"
         synced_tts = f"outputs/recap_audio_{job_id}.mp3"
-        srt_file = f"outputs/subs_{job_id}.srt"
         out_vid = f"outputs/MovieMyanmarAi_{job_id}.mp4"
 
         with open(in_vid, "wb") as f:
             f.write(await video.read())
 
-        vid_dur = get_media_duration(in_vid)
+        vid_w, vid_h, vid_dur = get_video_info(in_vid)
         vid_has_audio = has_audio_stream(in_vid)
 
-        await build_synced_dub_and_srt(
-            script_text, vid_dur, voice_type, speaking_style, speed,
-            user, user_id, job_id, synced_tts, srt_file
+        # Compute target output resolution for crisp Burmese PNG subtitles
+        out_w, out_h = vid_w, vid_h
+        if aspect_ratio == "9:16":
+            out_w, out_h = 720, 1280
+        elif aspect_ratio == "1:1":
+            out_w, out_h = 720, 720
+        elif resolution in ["360p", "480p", "720p", "1080p"]:
+            h_map = {"360p": 360, "480p": 480, "720p": 720, "1080p": 1080}
+            out_h = h_map[resolution]
+            out_w = int((vid_w / max(1, vid_h)) * out_h)
+            if out_w % 2 != 0:
+                out_w += 1
+
+        png_overlays = await build_synced_dub_and_png_subs(
+            script_text, out_w, out_h, vid_dur, pov_mode, voice_type, speaking_style, speed,
+            sub_enabled == "1", sub_size, sub_color, user, user_id, job_id, synced_tts
         )
 
-        filters = []
+        # Build FFmpeg command with PNG Burmese subtitle overlays (100% crisp Burmese script, zero boxes!)
+        cmd = ["ffmpeg", "-y", "-i", in_vid, "-i", synced_tts]
+        for _, _, p_path in png_overlays:
+            cmd.extend(["-i", p_path])
+
+        v_filters = []
         if flip_h == "1":
-            filters.append("hflip")
+            v_filters.append("hflip")
 
         if mask_mode == "blur" and box_w > 0 and box_h > 0:
-            filters.append(
+            v_filters.append(
                 f"split[main][b];[b]crop=iw*{box_w/100}:ih*{box_h/100}:iw*{box_x/100}:ih*{box_y/100},boxblur=15:5[blurred];"
                 f"[main][blurred]overlay=W*{box_x/100}:H*{box_y/100}"
             )
 
         if aspect_ratio == "9:16":
-            filters.append("scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2")
+            v_filters.append("scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2")
         elif aspect_ratio == "1:1":
-            filters.append("scale=720:720:force_original_aspect_ratio=decrease,pad=720:720:(ow-iw)/2:(oh-ih)/2")
+            v_filters.append("scale=720:720:force_original_aspect_ratio=decrease,pad=720:720:(ow-iw)/2:(oh-ih)/2")
         elif resolution in ["360p", "480p", "720p", "1080p"]:
-            h_map = {"360p": 360, "480p": 480, "720p": 720, "1080p": 1080}
-            filters.append(f"scale=-2:{h_map[resolution]}")
+            v_filters.append(f"scale={out_w}:{out_h}")
 
-        if sub_enabled == "1" and os.path.exists(srt_file):
-            primary_hex = "&H00FFFF&" if sub_color in ["clean", "sunny", "box"] else "&HFFFFFF&"
-            filters.append(f"subtitles={srt_file}:force_style='FontSize={sub_size},PrimaryColour={primary_hex},OutlineColour=&H000000&,Outline=2'")
+        base_v = ",".join(v_filters) if v_filters else "null"
+        fc_parts = [f"[0:v]{base_v}[v0]"]
+        last_v = "v0"
 
-        vf_str = ",".join(filters) if filters else "null"
+        for idx, (st, et, _) in enumerate(png_overlays):
+            inp_idx = idx + 2
+            next_v = f"v{idx + 1}"
+            fc_parts.append(f"[{last_v}][{inp_idx}:v]overlay=0:0:enable='between(t,{st:.2f},{et:.2f})'[{next_v}]")
+            last_v = next_v
 
+        # SMOOTH ORIGINAL BGM AUDIO MIXING (NO CHOPPY PHASE ARTIFACTS!)
         if orig_audio_mode == "bgm_only" and vid_has_audio:
-            filter_complex = (
-                f"[0:v]{vf_str}[v];"
-                f"[0:a]pan=stereo|c0=c0-c1|c1=c1-c0,volume=0.55[bgm];"
-                f"[1:a]volume=1.45[fg];"
-                f"[bgm][fg]amix=inputs=2:duration=first:normalize=0[a]"
-            )
+            fc_parts.append(f"[0:a]lowpass=f=450,volume=0.22[bgm];[1:a]volume=1.45[fg];[bgm][fg]amix=inputs=2:duration=first:normalize=0[a]")
         elif orig_audio_mode == "low" and vid_has_audio:
-            filter_complex = (
-                f"[0:v]{vf_str}[v];"
-                f"[0:a]volume=0.08[bg];"
-                f"[1:a]volume=1.40[fg];"
-                f"[bg][fg]amix=inputs=2:duration=first:normalize=0[a]"
-            )
+            fc_parts.append(f"[0:a]volume=0.10[bg];[1:a]volume=1.40[fg];[bg][fg]amix=inputs=2:duration=first:normalize=0[a]")
         else:
-            filter_complex = f"[0:v]{vf_str}[v];[1:a]volume=1.40[a]"
+            fc_parts.append(f"[1:a]volume=1.40[a]")
 
-        cmd = [
-            "ffmpeg", "-y", "-i", in_vid, "-i", synced_tts,
-            "-filter_complex", filter_complex,
-            "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", out_vid
-        ]
+        cmd.extend([
+            "-filter_complex", ";".join(fc_parts),
+            "-map", f"[{last_v}]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", out_vid
+        ])
         subprocess.run(cmd, check=True)
 
         return {"video_url": f"/{out_vid}"}
