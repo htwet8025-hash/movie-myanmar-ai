@@ -1,5 +1,6 @@
 import os
 import uuid
+import base64
 import sqlite3
 import asyncio
 import subprocess
@@ -11,7 +12,6 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-import google.generativeai as genai
 
 load_dotenv()
 
@@ -20,9 +20,6 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "1638781080").strip())
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://movie-myanmar-ai-2.onrender.com").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 os.makedirs("outputs", exist_ok=True)
 os.makedirs("uploads", exist_ok=True)
@@ -115,7 +112,7 @@ async def generate_free_burmese_tts(text: str, style_key: str, speed_mult: float
     )
     await communicate.save(out_path)
 
-# --- VOICE CLONING ---
+# --- VOICE CLONING (MP3/WAV + MP4 VIDEO) ---
 def clone_voice_elevenlabs(user_id: int, voice_name: str, file_path: str):
     if not ELEVENLABS_API_KEY:
         raise HTTPException(status_code=400, detail="ELEVENLABS_API_KEY မထည့်ရသေးပါ။ Free အသံ ၃ မျိုးကို အသုံးပြုနိုင်ပါသည်။")
@@ -149,29 +146,45 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- FAST AUTO TRANSLATE WITH DURATION MATCHING ---
+# --- FAST AUTO TRANSLATE (SUPPORTS BOTH AQ.Ab8... & AIza... KEYS) ---
 def auto_transcribe_and_translate_fast(audio_path: str, duration_sec: float) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။")
 
     with open(audio_path, "rb") as f:
-        audio_bytes = f.read()
+        audio_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    # Target ~15 to 18 Burmese characters per second so TTS duration matches video duration
     target_chars = max(40, int(duration_sec * 16)) if duration_sec > 0 else 250
-
-    model = genai.GenerativeModel("gemini-2.5-flash")
     prompt = (
         f"Listen to this audio (duration: {duration_sec:.1f} seconds). "
         f"Translate and narrate what is happening into natural spoken Burmese movie-recap style. "
-        f"CRITICAL: Keep the Burmese script length around {target_chars} characters so when read aloud it finishes in about {duration_sec:.1f} seconds. "
+        f"Keep the Burmese script length around {target_chars} characters so when read aloud it finishes in about {duration_sec:.1f} seconds. "
         f"Output ONLY the Burmese narration text without any English, timestamps, or explanations."
     )
-    response = model.generate_content([
-        {"mime_type": "audio/mp3", "data": audio_bytes},
-        prompt
-    ])
-    return response.text.strip()
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "audio/mp3", "data": audio_b64}}
+            ]
+        }]
+    }
+
+    last_err = ""
+    for model_name in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        res = requests.post(url, json=payload, timeout=60)
+        if res.status_code == 200:
+            data = res.json()
+            try:
+                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except Exception:
+                last_err = str(data)
+        else:
+            last_err = f"{res.status_code}: {res.text}"
+
+    raise HTTPException(status_code=500, detail=f"Gemini Error: {last_err}")
 
 # --- TELEGRAM BOT ---
 tg_app = Application.builder().token(BOT_TOKEN).build() if BOT_TOKEN else None
@@ -247,7 +260,7 @@ async def start_telegram_bot():
 async def on_startup():
     asyncio.create_task(start_telegram_bot())
 
-# --- FULL PRO UI MATCHING SCREENSHOTS ---
+# --- FULL PRO UI ---
 HTML_UI = """<!DOCTYPE html>
 <html lang="my">
 <head>
@@ -349,7 +362,7 @@ HTML_UI = """<!DOCTYPE html>
           🖼️ မူရင်း video ထဲက စာသား/logo ကို ဖုံးချင်ရင် ပုံပေါ်မှာ box ဆွဲပါ (သို့မဟုတ် Video ဘယ်/ညာ လှန်ပါ)
         </div>
 
-        <!-- UPDATED 3 BUTTONS: ဖုံးမထားဘူး | Blur | ဘယ်/ညာလှန် -->
+        <!-- 3 BUTTONS: ဖုံးမထားဘူး | Blur | ဘယ်/ညာလှန် -->
         <div class="grid grid-cols-3 gap-2">
           <button onclick="setMaskMode('none')" id="mask-none" class="py-2.5 rounded-xl bg-[#1e2030] border border-gray-700 text-xs font-bold text-gray-300">ဖုံးမထားဘူး</button>
           <button onclick="setMaskMode('blur')" id="mask-blur" class="py-2.5 rounded-xl grad-pill text-xs font-extrabold">🌫️ Blur</button>
@@ -493,7 +506,7 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- UPDATED: FULL-WIDTH AI BUTTON ON TOP + LABEL BELOW -->
+        <!-- FULL-WIDTH AI BUTTON ON TOP + LABEL BELOW -->
         <div class="space-y-2 pt-2">
           <button onclick="autoTranslateVideo()" id="autoTransBtn" class="w-full py-3.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 font-extrabold text-sm text-white shadow-lg flex items-center justify-center gap-2 active:scale-98">
             ✨ AI Auto ဘာသာပြန် (အမြန်စာသားထုတ်မည်)
@@ -792,7 +805,6 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
-    // Flip Video Left/Right (Horizontal Mirror)
     function toggleFlipVideo() {
       state.flipH = !state.flipH;
       const btn = document.getElementById("btn-flip");
@@ -934,7 +946,9 @@ HTML_UI = """<!DOCTYPE html>
       fd.append("video", file);
       try {
         const res = await fetch("/api/auto-script", { method: "POST", body: fd });
-        const data = await res.json();
+        const rawText = await res.text();
+        let data = {};
+        try { data = JSON.parse(rawText); } catch(e) { throw new Error(rawText); }
         if (!res.ok) throw new Error(data.detail || "Error");
         document.getElementById("recapScript").value = data.script;
       } catch (e) {
@@ -945,7 +959,7 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
-    // START RECAP RENDER (DURATION SYNCED)
+    // START RECAP RENDER
     async function startRecapRender() {
       const file = document.getElementById("videoInput").files[0];
       const script = document.getElementById("recapScript").value.trim();
@@ -996,7 +1010,9 @@ HTML_UI = """<!DOCTYPE html>
 
       try {
         const res = await fetch("/api/render-recap", { method: "POST", body: fd });
-        const data = await res.json();
+        const rawText = await res.text();
+        let data = {};
+        try { data = JSON.parse(rawText); } catch(e) { throw new Error(rawText); }
         clearInterval(timer);
         if (!res.ok) throw new Error(data.detail || "Render failed");
 
@@ -1155,7 +1171,6 @@ async def api_auto_script(video: UploadFile = File(...)):
         f.write(await video.read())
 
     vid_dur = get_media_duration(in_vid)
-    # Extract ultra-lightweight 32kbps mono audio for instant upload & fast AI processing
     subprocess.run(
         ["ffmpeg", "-y", "-i", in_vid, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", in_aud],
         check=True
@@ -1196,11 +1211,9 @@ async def api_render_recap(
     else:
         await generate_free_burmese_tts(script_text, voice_type if voice_type != "cloned" else "maung_thiha", speed, raw_tts)
 
-    # Auto-sync Burmese TTS duration to match original Video duration
     tts_dur = get_media_duration(raw_tts)
     if vid_dur > 0 and tts_dur > 0:
         ratio = tts_dur / vid_dur
-        # Clamp tempo between 0.75x and 1.45x so voice sounds natural while fitting video length
         tempo = max(0.75, min(1.45, ratio))
         subprocess.run(
             ["ffmpeg", "-y", "-i", raw_tts, "-filter:a", f"atempo={tempo:.3f}", synced_tts],
@@ -1226,7 +1239,6 @@ async def api_render_recap(
 
     vf_str = ",".join(filters) if filters else "null"
 
-    # -shortest ensures output video duration matches the original video duration
     cmd = [
         "ffmpeg", "-y", "-i", in_vid, "-i", synced_tts,
         "-filter_complex", f"[0:v]{vf_str}[v];[0:a]volume=0.12[bg];[1:a]volume=1.35[fg];[bg][fg]amix=inputs=2:duration=first[a]",
