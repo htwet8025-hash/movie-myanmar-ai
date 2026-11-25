@@ -4,6 +4,7 @@ import base64
 import sqlite3
 import asyncio
 import subprocess
+import traceback
 import requests
 import edge_tts
 from dotenv import load_dotenv
@@ -78,23 +79,49 @@ def update_points(user_id: int, delta: int):
     conn.commit()
     conn.close()
 
-# --- MEDIA DURATION HELPER ---
+# --- MEDIA HELPERS ---
 def get_media_duration(file_path: str) -> float:
     try:
         cmd = [
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", file_path
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        res = subprocess.run(cmd, capture_output=True, text=True)
         return float(res.stdout.strip())
     except Exception:
         return 0.0
 
+def has_audio_stream(file_path: str) -> bool:
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-select_streams", "a",
+            "-show_entries", "stream=codec_type", "-of", "csv=p=0", file_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        return "audio" in res.stdout
+    except Exception:
+        return False
+
 # --- FREE BURMESE MALE VOICES (3 STYLES) ---
 FREE_VOICES = {
-    "maung_thiha": {"voice": "my-MM-ThihaNeural", "pitch": "+0Hz", "rate": "+0%"},
-    "ko_zaw": {"voice": "my-MM-ThihaNeural", "pitch": "+4Hz", "rate": "+10%"},
-    "u_min": {"voice": "my-MM-ThihaNeural", "pitch": "-5Hz", "rate": "-5%"},
+    "maung_thiha": {
+        "voice": "my-MM-ThihaNeural",
+        "pitch": "+0Hz",
+        "rate": "+0%",
+        "sample": "မင်္ဂလာပါခင်ဗျာ။ ကျွန်တော်ကတော့ မောင်သီဟ ဖြစ်ပါတယ်။ ဇာတ်လမ်းအကျဉ်းချုပ်တွေကို နားထောင်လို့ကောင်းအောင် ပြောပြပေးပါမယ်။"
+    },
+    "ko_zaw": {
+        "voice": "my-MM-ThihaNeural",
+        "pitch": "+4Hz",
+        "rate": "+10%",
+        "sample": "ဟုတ်ကဲ့ အခုဆိုရင် ပွဲချိန်စတင်နေပါပြီခင်ဗျာ။ ကျွန်တော် ကိုဇော် ကနေ သွက်သွက်လက်လက် တင်ဆက်ပေးသွားမှာပါ။"
+    },
+    "u_min": {
+        "voice": "my-MM-ThihaNeural",
+        "pitch": "-5Hz",
+        "rate": "-5%",
+        "sample": "လျှို့ဝှက်ဆန်းကြယ်တဲ့ ဒီဇာတ်လမ်းရဲ့ နောက်ကွယ်မှာ ဘာတွေရှိနေမလဲဆိုတာ ဦးမင်းနဲ့အတူ ကြည့်ရှုလိုက်ရအောင်။"
+    },
 }
 
 async def generate_free_burmese_tts(text: str, style_key: str, speed_mult: float, out_path: str):
@@ -146,8 +173,8 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- FAST AUTO TRANSLATE (USES gemini-3.8-flash) ---
-def auto_transcribe_and_translate_fast(audio_path: str, duration_sec: float) -> str:
+# --- FAST AUTO TRANSLATE (SAFE & SUPPORTS ALL GEMINI MODELS) ---
+def call_gemini_audio(audio_path: str, duration_sec: float) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY မထည့်ရသေးပါ။")
 
@@ -172,17 +199,20 @@ def auto_transcribe_and_translate_fast(audio_path: str, duration_sec: float) -> 
     }
 
     last_err = ""
-    for model_name in ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.0-flash"]:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-        res = requests.post(url, json=payload, timeout=60)
-        if res.status_code == 200:
-            data = res.json()
-            try:
-                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except Exception:
-                last_err = str(data)
-        else:
-            last_err = f"{res.status_code}: {res.text}"
+    for model_name in ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-3.5-flash"]:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+            res = requests.post(url, json=payload, timeout=60)
+            if res.status_code == 200:
+                data = res.json()
+                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+                if text:
+                    return text
+                last_err = f"Empty response from {model_name}: {data}"
+            else:
+                last_err = f"{model_name} ({res.status_code}): {res.text}"
+        except Exception as req_e:
+            last_err = str(req_e)
 
     raise HTTPException(status_code=500, detail=f"Gemini Error: {last_err}")
 
@@ -527,17 +557,19 @@ HTML_UI = """<!DOCTYPE html>
       <audio id="ttsOnlyAudio" controls class="w-full hidden"></audio>
     </div>
 
-    <!-- VOICE SELECTION CARDS -->
+    <!-- VOICE SELECTION CARDS (WITH WORKING SAMPLE PREVIEW PLAY BUTTONS) -->
     <div class="card-dark rounded-2xl p-4 space-y-3">
       <div class="flex justify-between items-start">
         <div>
           <h3 class="font-bold text-base text-white">🗣️ Voice</h3>
-          <p class="text-[11px] text-gray-400 mt-0.5">အသံရွေးပါ ဒါမှမဟုတ် ကိုယ်ပိုင် sample တင်ပါ (Free ၃ မျိုး + Voice Clone)</p>
+          <p class="text-[11px] text-gray-400 mt-0.5">အသံရွေးပါ (▶ နှိပ်ပြီး အသံအစမ်း နားထောင်ကြည့်နိုင်ပါတယ်)</p>
         </div>
         <button onclick="document.getElementById('cloneModal').classList.remove('hidden')" class="text-[11px] bg-purple-600/30 border border-purple-400/50 text-purple-200 px-2.5 py-1.5 rounded-xl font-bold">
           + Voice Clone
         </button>
       </div>
+
+      <audio id="samplePreviewPlayer" class="hidden"></audio>
 
       <div class="grid grid-cols-2 gap-2 text-xs">
         <div onclick="selectVoice('maung_thiha', this)" class="voice-card p-3 rounded-xl bg-[#1e2030] border-2 border-purple-500 flex items-center justify-between cursor-pointer">
@@ -545,7 +577,7 @@ HTML_UI = """<!DOCTYPE html>
             <div class="font-bold text-white">📖 ပုံပြင်ပြောသူ</div>
             <div class="text-[10px] text-emerald-400">မောင်သီဟ · Free</div>
           </div>
-          <span class="w-6 h-6 rounded-full bg-gray-800 flex items-center justify-center text-[10px]">▶</span>
+          <button type="button" onclick="playVoiceSample(event, 'maung_thiha', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-teal-500 hover:text-black flex items-center justify-center text-xs font-bold shadow">▶</button>
         </div>
 
         <div onclick="selectVoice('ko_zaw', this)" class="voice-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
@@ -553,7 +585,7 @@ HTML_UI = """<!DOCTYPE html>
             <div class="font-bold text-white">⚽ ဘောလုံး/ဝေဖန်သူ</div>
             <div class="text-[10px] text-emerald-400">ကိုဇော် · Free</div>
           </div>
-          <span class="w-6 h-6 rounded-full bg-gray-800 flex items-center justify-center text-[10px]">▶</span>
+          <button type="button" onclick="playVoiceSample(event, 'ko_zaw', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-teal-500 hover:text-black flex items-center justify-center text-xs font-bold shadow">▶</button>
         </div>
 
         <div onclick="selectVoice('u_min', this)" class="voice-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
@@ -561,7 +593,7 @@ HTML_UI = """<!DOCTYPE html>
             <div class="font-bold text-white">🎬 ဇာတ်လမ်းပြောသူ</div>
             <div class="text-[10px] text-emerald-400">ဦးမင်း · Free</div>
           </div>
-          <span class="w-6 h-6 rounded-full bg-gray-800 flex items-center justify-center text-[10px]">▶</span>
+          <button type="button" onclick="playVoiceSample(event, 'u_min', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-teal-500 hover:text-black flex items-center justify-center text-xs font-bold shadow">▶</button>
         </div>
 
         <div onclick="selectVoice('cloned', this)" class="voice-card p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
@@ -569,7 +601,7 @@ HTML_UI = """<!DOCTYPE html>
             <div class="font-bold text-amber-300">⭐ အသံတူပွား</div>
             <div class="text-[10px] text-gray-400">My Cloned Voice</div>
           </div>
-          <span class="w-6 h-6 rounded-full bg-gray-800 flex items-center justify-center text-[10px]">🎙️</span>
+          <button type="button" onclick="playVoiceSample(event, 'cloned', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold shadow">▶</button>
         </div>
       </div>
 
@@ -934,6 +966,41 @@ HTML_UI = """<!DOCTYPE html>
       activateGroup("spd-btn", el);
     }
 
+    // PLAY VOICE SAMPLE PREVIEW
+    let activePlayBtn = null;
+    async function playVoiceSample(event, voiceKey, btn) {
+      event.stopPropagation();
+      const player = document.getElementById("samplePreviewPlayer");
+
+      if (activePlayBtn && activePlayBtn !== btn) {
+        activePlayBtn.innerText = "▶";
+      }
+      if (!player.paused && activePlayBtn === btn) {
+        player.pause();
+        btn.innerText = "▶";
+        return;
+      }
+
+      activePlayBtn = btn;
+      btn.innerText = "⏳";
+
+      try {
+        const res = await fetch(`/api/voice-sample/${voiceKey}?user_id=${userId}`);
+        const rawText = await res.text();
+        let data = {};
+        try { data = JSON.parse(rawText); } catch(e) { throw new Error(rawText); }
+        if (!res.ok) throw new Error(data.detail || "အသံနမူနာ ဖွင့်မရပါ");
+
+        player.src = data.audio_url;
+        btn.innerText = "⏸";
+        await player.play();
+        player.onended = () => { btn.innerText = "▶"; };
+      } catch (err) {
+        btn.innerText = "▶";
+        alert(err.message);
+      }
+    }
+
     // FAST AUTO AI TRANSLATE
     async function autoTranslateVideo() {
       const file = document.getElementById("videoInput").files[0];
@@ -1126,6 +1193,25 @@ async def serve_ui():
 async def api_user(user_id: int):
     return get_or_create_user(user_id)
 
+@app.get("/api/voice-sample/{voice_key}")
+async def api_voice_sample(voice_key: str, user_id: int = 1638781080):
+    if voice_key == "cloned":
+        user = get_or_create_user(user_id)
+        if not user["cloned_voice_id"]:
+            raise HTTPException(status_code=400, detail="အသံတူပွား (Voice Clone) အရင်ဖန်တီးပြီးမှ နားထောင်နိုင်ပါသည်။")
+        out_path = f"outputs/sample_cloned_{user_id}.mp3"
+        if not os.path.exists(out_path):
+            generate_cloned_tts("မင်္ဂလာပါ။ ဒါကတော့ သင့်ရဲ့ ကိုယ်ပိုင် အသံတူပွား နမူနာ ဖြစ်ပါတယ်။", user["cloned_voice_id"], out_path)
+        return {"audio_url": f"/{out_path}"}
+
+    if voice_key not in FREE_VOICES:
+        raise HTTPException(status_code=404, detail="Voice not found")
+
+    out_path = f"outputs/sample_{voice_key}.mp3"
+    if not os.path.exists(out_path):
+        await generate_free_burmese_tts(FREE_VOICES[voice_key]["sample"], voice_key, 1.0, out_path)
+    return {"audio_url": f"/{out_path}"}
+
 @app.post("/api/tts")
 async def api_tts(user_id: int = Form(...), text: str = Form(...), voice_type: str = Form(...), speed: float = Form(1.0)):
     user = get_or_create_user(user_id)
@@ -1154,6 +1240,9 @@ async def api_clone_voice(user_id: int = Form(...), voice_name: str = Form(...),
     with open(raw_path, "wb") as f:
         f.write(await sample.read())
 
+    if not has_audio_stream(raw_path):
+        raise HTTPException(status_code=400, detail="တင်လိုက်သော ဖိုင်ထဲတွင် အသံ (Audio) မပါဝင်ပါ။")
+
     subprocess.run(
         ["ffmpeg", "-y", "-i", raw_path, "-vn", "-acodec", "libmp3lame", "-q:a", "2", audio_path],
         check=True
@@ -1167,16 +1256,28 @@ async def api_auto_script(video: UploadFile = File(...)):
     job_id = str(uuid.uuid4())[:8]
     in_vid = f"uploads/tmp_{job_id}_{video.filename}"
     in_aud = f"uploads/tmp_{job_id}.mp3"
-    with open(in_vid, "wb") as f:
-        f.write(await video.read())
 
-    vid_dur = get_media_duration(in_vid)
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", in_vid, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", in_aud],
-        check=True
-    )
-    script = auto_transcribe_and_translate_fast(in_aud, vid_dur)
-    return {"script": script}
+    try:
+        with open(in_vid, "wb") as f:
+            f.write(await video.read())
+
+        if not has_audio_stream(in_vid):
+            raise HTTPException(status_code=400, detail="ဤ Video ဖိုင်ထဲတွင် စကားပြောအသံ (Audio) လုံးဝ မပါဝင်ပါ။ မြန်မာစာသားကို ကိုယ်တိုင် ရိုက်ထည့်ပေးပါ။")
+
+        vid_dur = get_media_duration(in_vid)
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-i", in_vid, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", in_aud],
+            capture_output=True, text=True
+        )
+        if res.returncode != 0 or not os.path.exists(in_aud):
+            raise HTTPException(status_code=500, detail=f"Audio ခွဲထုတ်မရပါ: {res.stderr[-200:]}")
+
+        script = call_gemini_audio(in_aud, vid_dur)
+        return {"script": script}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Auto Script Error: {str(e)}")
 
 @app.post("/api/render-recap")
 async def api_render_recap(
@@ -1193,60 +1294,71 @@ async def api_render_recap(
     aspect_ratio: str = Form("original"),
     video: UploadFile = File(...)
 ):
-    user = get_or_create_user(user_id)
-    job_id = str(uuid.uuid4())[:8]
-    in_vid = f"uploads/in_{job_id}_{video.filename}"
-    raw_tts = f"outputs/raw_audio_{job_id}.mp3"
-    synced_tts = f"outputs/recap_audio_{job_id}.mp3"
-    out_vid = f"outputs/MovieMyanmarAi_{job_id}.mp4"
+    try:
+        user = get_or_create_user(user_id)
+        job_id = str(uuid.uuid4())[:8]
+        in_vid = f"uploads/in_{job_id}_{video.filename}"
+        raw_tts = f"outputs/raw_audio_{job_id}.mp3"
+        synced_tts = f"outputs/recap_audio_{job_id}.mp3"
+        out_vid = f"outputs/MovieMyanmarAi_{job_id}.mp4"
 
-    with open(in_vid, "wb") as f:
-        f.write(await video.read())
+        with open(in_vid, "wb") as f:
+            f.write(await video.read())
 
-    vid_dur = get_media_duration(in_vid)
+        vid_dur = get_media_duration(in_vid)
+        vid_has_audio = has_audio_stream(in_vid)
 
-    if voice_type == "cloned" and user["cloned_voice_id"] and user["points"] >= 10:
-        generate_cloned_tts(script_text, user["cloned_voice_id"], raw_tts)
-        update_points(user_id, -10)
-    else:
-        await generate_free_burmese_tts(script_text, voice_type if voice_type != "cloned" else "maung_thiha", speed, raw_tts)
+        if voice_type == "cloned" and user["cloned_voice_id"] and user["points"] >= 10:
+            generate_cloned_tts(script_text, user["cloned_voice_id"], raw_tts)
+            update_points(user_id, -10)
+        else:
+            await generate_free_burmese_tts(script_text, voice_type if voice_type != "cloned" else "maung_thiha", speed, raw_tts)
 
-    tts_dur = get_media_duration(raw_tts)
-    if vid_dur > 0 and tts_dur > 0:
-        ratio = tts_dur / vid_dur
-        tempo = max(0.75, min(1.45, ratio))
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", raw_tts, "-filter:a", f"atempo={tempo:.3f}", synced_tts],
-            check=True
-        )
-    else:
-        synced_tts = raw_tts
+        tts_dur = get_media_duration(raw_tts)
+        if vid_dur > 0 and tts_dur > 0:
+            ratio = tts_dur / vid_dur
+            tempo = max(0.75, min(1.45, ratio))
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", raw_tts, "-filter:a", f"atempo={tempo:.3f}", synced_tts],
+                check=True
+            )
+        else:
+            synced_tts = raw_tts
 
-    filters = []
-    if flip_h == "1":
-        filters.append("hflip")
+        filters = []
+        if flip_h == "1":
+            filters.append("hflip")
 
-    if mask_mode == "blur" and box_w > 0 and box_h > 0:
-        filters.append(
-            f"split[main][b];[b]crop=iw*{box_w/100}:ih*{box_h/100}:iw*{box_x/100}:ih*{box_y/100},boxblur=15:5[blurred];"
-            f"[main][blurred]overlay=W*{box_x/100}:H*{box_y/100}"
-        )
+        if mask_mode == "blur" and box_w > 0 and box_h > 0:
+            filters.append(
+                f"split[main][b];[b]crop=iw*{box_w/100}:ih*{box_h/100}:iw*{box_x/100}:ih*{box_y/100},boxblur=15:5[blurred];"
+                f"[main][blurred]overlay=W*{box_x/100}:H*{box_y/100}"
+            )
 
-    if aspect_ratio == "9:16":
-        filters.append("scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2")
-    elif aspect_ratio == "1:1":
-        filters.append("scale=720:720:force_original_aspect_ratio=decrease,pad=720:720:(ow-iw)/2:(oh-ih)/2")
+        if aspect_ratio == "9:16":
+            filters.append("scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2")
+        elif aspect_ratio == "1:1":
+            filters.append("scale=720:720:force_original_aspect_ratio=decrease,pad=720:720:(ow-iw)/2:(oh-ih)/2")
 
-    vf_str = ",".join(filters) if filters else "null"
+        vf_str = ",".join(filters) if filters else "null"
 
-    cmd = [
-        "ffmpeg", "-y", "-i", in_vid, "-i", synced_tts,
-        "-filter_complex", f"[0:v]{vf_str}[v];[0:a]volume=0.12[bg];[1:a]volume=1.35[fg];[bg][fg]amix=inputs=2:duration=first[a]",
-        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", out_vid
-    ]
-    subprocess.run(cmd, check=True)
+        if vid_has_audio:
+            filter_complex = f"[0:v]{vf_str}[v];[0:a]volume=0.12[bg];[1:a]volume=1.35[fg];[bg][fg]amix=inputs=2:duration=first[a]"
+        else:
+            filter_complex = f"[0:v]{vf_str}[v];[1:a]volume=1.35[a]"
 
-    return {"video_url": f"/{out_vid}"}
+        cmd = [
+            "ffmpeg", "-y", "-i", in_vid, "-i", synced_tts,
+            "-filter_complex", filter_complex,
+            "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", out_vid
+        ]
+        subprocess.run(cmd, check=True)
+
+        return {"video_url": f"/{out_vid}"}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Render Error: {str(e)}")
 
 @app.post("/api/send-to-telegram")
 async def api_send_to_tg(user_id: int = Form(...), video_url: str = Form(...)):
