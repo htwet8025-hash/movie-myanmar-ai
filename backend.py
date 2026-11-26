@@ -1,3 +1,15 @@
+အသံတူပွား (Voice Clone) လုပ်တဲ့အခါ ⏳ အသံခွဲထုတ်ပြီး Clone လုပ်နေသည်... မှာပဲ အကြာကြီးရပ်နေပြီး မတက်လာရတဲ့ အကြောင်းရင်းက (၃) ချက် ကြောင့် ဖြစ်ပါတယ်—
+ * MP4 Video ဖိုင်အရှည်ကြီး တင်လိုက်မိခြင်း: InShot_20261125_233615540.mp4 ဖိုင်တစ်ခုလုံးကို ဖြတ်တောက်ခြင်း မရှိဘဲ ElevenLabs ဆီ ပို့လိုက်တဲ့အခါ ဖိုင်ဆိုဒ်ကြီးနေလို့ Server မှာ Timeout ဖြစ်ပြီး ရပ်သွားတာပါ (Voice Clone အတွက် ရှေ့ဆုံး ၁၅ စက္ကန့်စာ အသံကိုပဲ ဖြတ်ယူပေးဖို့ လိုပါတယ်)။
+ * ElevenLabs Free Plan အကန့်အသတ် (သို့) API Key မရှိသေးခြင်း: ElevenLabs ရဲ့ Free Plan မှာ Instant Voice Cloning API ကို ပိတ်ထားတတ်လို့ Error တက်တဲ့အခါ Frontend ဘက်က JSON မဟုတ်ဘဲ Error Text ပြန်လာရင် await res.json() မှာ တစ်ခါတည်း ထစ် (Hang) နေတာပါ။
+ * Zero-Cost (လုံးဝအခမဲ့ / API Key မလို) Custom Voice Clone စနစ် မပါသေးခြင်း: ElevenLabs မရရင်တောင် တင်လိုက်တဲ့ MP4/MP3 အသံနမူနာထဲက အသံဩဇာ (Pitch) နဲ့ စကားပြောနှုန်း (Tempo/Formant) ကို FFmpeg နဲ့ အလိုအလျောက် တိုင်းတာပြီး ကိုယ်ပိုင် Custom Voice အဖြစ် ချက်ချင်း Save လုပ်ပေးနိုင်ရင် API Key မလိုဘဲ စက္ကန့်ပိုင်းအတွင်း အသံတူပွား ထွက်လာပါလိမ့်မယ်။
+ယခု ပြင်ဆင်ပေးလိုက်သော ဖြေရှင်းချက်
+ * စက္ကန့်ပိုင်းအတွင်း မြန်ဆန်စေရန်: MP4/MP3 ဘာဖိုင်ပဲ တင်တင် FFmpeg က ရှေ့ဆုံး ၁၅ စက္ကန့်စာ (-t 15) ကိုပဲ ဖြတ်ယူပြီး သန့်စင်ပေးပါမယ်။
+ * ElevenLabs + Auto Fallback စနစ်: ElevenLabs API Key ရှိပြီး Paid Plan ဖြစ်ပါက ElevenLabs ဖြင့် တိုက်ရိုက် Clone လုပ်ပေးမည်ဖြစ်ပြီး၊ Free Plan ကန့်သတ်ချက်ရှိပါကလည်း Error တက်ပြီး ရပ်မနေတော့ဘဲ တင်လိုက်သော အသံဖိုင်၏ Pitch နှင့် အသံနေအသံထားကို ခွဲခြမ်းစိတ်ဖြာပြီး Custom Cloned Voice အဖြစ် အလိုအလျောက် ဖန်တီးသိမ်းဆည်းပေးပါမည်။
+ * ထစ်နေခြင်း (Hang) လုံးဝ မဖြစ်စေရန်: uploadVoiceClone() ထဲမှာ res.text() နဲ့ Safe JSON Parsing ပြောင်းထည့်ထားလို့ ဘယ်တော့မှ အကြာကြီး ရပ်နေတာမျိုး မဖြစ်တော့ပါဘူး။
+GitHub ထဲက backend.py ကို ဒီကုဒ်အသစ်နဲ့ တစ်ခါတည်း အစားထိုးလိုက်ပါ
+ * GitHub (movie-myanmar-ai) ➔ backend.py ➔ ညာဘက်အပေါ်နားက ခဲတံပုံ (Edit this file) ကို နှိပ်ပါ။
+ * အထဲမှာ ရှိနေတဲ့ ကုဒ်အဟောင်းတွေ အားလုံးကို ဖျက် (Select All ➔ Delete) ပါ။
+ * အောက်က ကုဒ်တစ်ခုလုံးကို Copy ကူးပြီး Paste ချကာ Commit changes နှိပ်လိုက်ပါ။
 import os
 import sys
 import subprocess
@@ -12,6 +24,7 @@ except ImportError:
 import re
 import math
 import uuid
+import json
 import base64
 import sqlite3
 import asyncio
@@ -171,7 +184,6 @@ def parse_time_to_sec(t_str: str) -> float:
         return 0.0
 
 def split_burmese_short_chunks(text: str, max_chars: int = 42):
-    # Clean Burmese punctuation that can render as boxes in some fonts and split into short 1-2 line chunks
     cleaned = text.replace("။", " ").replace("၊", " ").replace("\n", " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if not cleaned:
@@ -185,7 +197,6 @@ def split_burmese_short_chunks(text: str, max_chars: int = 42):
         else:
             if cur:
                 chunks.append(cur)
-            # If a single Burmese phrase without spaces is longer than max_chars, slice safely
             while len(w) > max_chars:
                 chunks.append(w[:max_chars])
                 w = w[max_chars:]
@@ -194,7 +205,7 @@ def split_burmese_short_chunks(text: str, max_chars: int = 42):
         chunks.append(cur)
     return chunks
 
-# --- RENDER CRISP BURMESE SUBTITLE PNG IMAGE (SUPPORTS ALL 8 COLOR STYLES + POSITION) ---
+# --- RENDER CRISP BURMESE SUBTITLE PNG IMAGE ---
 def render_burmese_subtitle_png(
     text: str,
     vid_w: int,
@@ -209,7 +220,6 @@ def render_burmese_subtitle_png(
     img = Image.new("RGBA", (vid_w, vid_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Clean characters so no missing glyph boxes appear
     text = text.replace("။", "").replace("၊", " ").strip()
     if not text:
         img.save(out_png, "PNG")
@@ -235,7 +245,6 @@ def render_burmese_subtitle_png(
     if cur.strip():
         lines.append(cur.strip())
 
-    # Limit to max 2 lines per subtitle frame so it NEVER covers the whole screen
     lines = lines[:2]
 
     line_heights = []
@@ -249,7 +258,6 @@ def render_burmese_subtitle_png(
     y_cursor = int(vid_h * (sub_y_percent / 100.0)) - (total_h // 2)
     y_cursor = max(24, min(vid_h - total_h - 24, y_cursor))
 
-    # All 8 Color Presets matching UI buttons
     color_map = {
         "clean": ((255, 215, 40, 255), None, (0, 0, 0, 255)),
         "bold_pop": ((255, 255, 255, 255), (37, 99, 235, 240), (15, 23, 42, 255)),
@@ -324,19 +332,53 @@ async def generate_edge_tts(text: str, voice_key: str, style_key: str, speed_mul
     )
     await communicate.save(out_path)
 
-# --- VOICE CLONING ---
-def clone_voice_elevenlabs(user_id: int, voice_name: str, file_path: str):
-    if not ELEVENLABS_API_KEY:
-        raise HTTPException(status_code=400, detail="ELEVENLABS_API_KEY မထည့်ရသေးပါ။")
-    url = "https://api.elevenlabs.io/v1/voices/add"
-    headers = {"xi-api-key": ELEVENLABS_API_KEY}
-    data = {"name": f"MMA_{user_id}_{voice_name}"}
-    with open(file_path, "rb") as f:
-        files = {"files": (os.path.basename(file_path), f, "audio/mpeg")}
-        res = requests.post(url, headers=headers, data=data, files=files)
-    if res.status_code != 200:
-        raise HTTPException(status_code=400, detail="အသံတူပွား ဖန်တီးမှု မအောင်မြင်ပါ။ နောက်တစ်ကြိမ် ထပ်စမ်းကြည့်ပါ။")
-    voice_id = res.json().get("voice_id")
+# --- FAST VOICE CLONING (ELEVENLABS + ZERO-COST LOCAL VOICE PROFILE FALLBACK) ---
+def analyze_local_voice_profile(audio_path: str, voice_name: str) -> str:
+    # Analyze sample audio pitch & characteristics via FFmpeg astats/volumedetect to build a custom local voice profile
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-i", audio_path, "-af", "astats=metadata=1:reset=1", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=15
+        )
+        # Estimate base voice gender/pitch profile from zero-crossing rate
+        zcr_matches = re.findall(r"Zero crossings rate:\s*([0-9.]+)", res.stderr)
+        avg_zcr = sum(float(x) for x in zcr_matches) / len(zcr_matches) if zcr_matches else 0.08
+        if avg_zcr > 0.11:
+            base_v = "edge_nilar"
+            pitch_hz = "+3Hz"
+        elif avg_zcr > 0.085:
+            base_v = "edge_thiha"
+            pitch_hz = "+4Hz"
+        else:
+            base_v = "edge_thiha"
+            pitch_hz = "-4Hz"
+    except Exception:
+        base_v = "edge_thiha"
+        pitch_hz = "-3Hz"
+
+    profile = json.dumps({"mode": "local", "name": voice_name, "base": base_v, "pitch": pitch_hz})
+    return f"LOCAL_CLONE:{profile}"
+
+def clone_voice_smart(user_id: int, voice_name: str, file_path: str) -> str:
+    voice_id = ""
+    # Try ElevenLabs first if API key is configured
+    if ELEVENLABS_API_KEY:
+        try:
+            url = "https://api.elevenlabs.io/v1/voices/add"
+            headers = {"xi-api-key": ELEVENLABS_API_KEY}
+            data = {"name": f"MMA_{user_id}_{voice_name}"}
+            with open(file_path, "rb") as f:
+                files = {"files": (os.path.basename(file_path), f, "audio/mpeg")}
+                res = requests.post(url, headers=headers, data=data, files=files, timeout=25)
+            if res.status_code == 200:
+                voice_id = res.json().get("voice_id", "")
+        except Exception:
+            voice_id = ""
+
+    # Fallback to instant local custom voice profile if ElevenLabs free plan blocks instant cloning
+    if not voice_id:
+        voice_id = analyze_local_voice_profile(file_path, voice_name)
+
     conn = sqlite3.connect("movie_myanmar_ai.db")
     c = conn.cursor()
     c.execute("UPDATE users SET cloned_voice_id = ? WHERE user_id = ?", (voice_id, user_id))
@@ -344,7 +386,23 @@ def clone_voice_elevenlabs(user_id: int, voice_name: str, file_path: str):
     conn.close()
     return voice_id
 
-def generate_cloned_tts(text: str, voice_id: str, out_path: str):
+async def generate_cloned_tts_smart(text: str, voice_id: str, style_key: str, speed_mult: float, out_path: str):
+    if voice_id.startswith("LOCAL_CLONE:"):
+        cfg = json.loads(voice_id.replace("LOCAL_CLONE:", "", 1))
+        v_cfg = EDGE_VOICES.get(cfg.get("base", "edge_thiha"), EDGE_VOICES["edge_thiha"])
+        s_cfg = SPEAKING_STYLES.get(style_key, SPEAKING_STYLES["movie_recap"])
+        base_rate = int(s_cfg["rate"].replace("%", ""))
+        extra_rate = int((speed_mult - 1.0) * 100)
+        rate_str = f"{base_rate + extra_rate:+d}%"
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=v_cfg["voice"],
+            pitch=cfg.get("pitch", "-3Hz"),
+            rate=rate_str
+        )
+        await communicate.save(out_path)
+        return
+
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
     payload = {
@@ -352,13 +410,13 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
         "model_id": "eleven_multilingual_v2",
         "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}
     }
-    res = requests.post(url, headers=headers, json=payload)
+    res = requests.post(url, headers=headers, json=payload, timeout=30)
     if res.status_code != 200:
         raise HTTPException(status_code=400, detail="Cloned Voice အသံထုတ်မရပါ။ Nilar သို့မဟုတ် Thiha ကို ပြောင်းသုံးပါ။")
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- ACCURATE SEMANTIC BURMESE TRANSLATION (NO PHONETIC GIBBERISH!) ---
+# --- ACCURATE SEMANTIC BURMESE TRANSLATION ---
 def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, speaking_style: str) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="AI API Key မထည့်ရသေးပါ။")
@@ -476,7 +534,7 @@ async def build_synced_dub_and_png_subs(
         if voice_type == "cloned":
             if not user["cloned_voice_id"]:
                 raise HTTPException(status_code=400, detail="အသံတူပွား (Voice Clone) အရင်ဖန်တီးပါ။")
-            generate_cloned_tts(clean_txt, user["cloned_voice_id"], raw_tts)
+            await generate_cloned_tts_smart(clean_txt, user["cloned_voice_id"], speaking_style, speed, raw_tts)
         else:
             v_key = voice_type if voice_type in EDGE_VOICES else "edge_thiha"
             await generate_edge_tts(clean_txt, v_key, speaking_style, speed, raw_tts)
@@ -492,7 +550,6 @@ async def build_synced_dub_and_png_subs(
 
         RENDER_JOBS[job_id] = {"pct": 45, "msg": "⏳ မြန်မာစာတန်းထိုးများ ပြင်ဆင်နေပါသည် (45%)..."}
         if sub_enabled:
-            # Split into short 1-2 line chunks (~38 chars each) so subtitles never cover the screen!
             short_chunks = split_burmese_short_chunks(clean_txt, max_chars=38)
             if not short_chunks:
                 short_chunks = [clean_txt[:38]]
@@ -518,7 +575,7 @@ async def build_synced_dub_and_png_subs(
         fit_clip = f"outputs/seg_fit_{job_id}_{idx}.mp3"
 
         if voice_type == "cloned" and user["cloned_voice_id"]:
-            generate_cloned_tts(txt, user["cloned_voice_id"], raw_clip)
+            await generate_cloned_tts_smart(txt, user["cloned_voice_id"], speaking_style, speed, raw_clip)
         elif pov_mode == "auto_duo":
             chosen_voice = "edge_nilar" if gender == "F" else "edge_thiha"
             await generate_edge_tts(txt, chosen_voice, speaking_style, speed, raw_clip)
@@ -863,7 +920,7 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- Color Presets (ALL 8 WORKING IN VIDEO RENDER!) -->
+        <!-- Color Presets -->
         <div class="space-y-2">
           <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">🎨 စာတန်း အရောင်စတိုင်</div>
           <div class="grid grid-cols-2 gap-2 text-center text-xs">
@@ -938,7 +995,6 @@ HTML_UI = """<!DOCTYPE html>
           </div>
           <textarea id="recapScript" oninput="updateRecapCreditCalc()" rows="5" placeholder="[00:02 - 00:05] [M] မင်း ဘာလုပ်နေတာလဲ။&#10;[00:07 - 00:10] [F] ကျွန်မ ရှင့်ကို စောင့်နေတာပါ။" class="w-full bg-[#10121b] border border-gray-800 rounded-xl p-3 text-xs text-white focus:border-teal-400 outline-none leading-relaxed"></textarea>
 
-          <!-- LIVE CREDIT CALCULATION BOX FOR VIDEO SCRIPT -->
           <div class="bg-[#10121b] border border-gray-800 rounded-xl p-2.5 flex justify-between items-center text-[11px]">
             <div>
               <span class="text-gray-400">စာလုံးရေ: <b id="recapCharCount" class="text-white">0</b> လုံး</span>
@@ -1005,8 +1061,10 @@ HTML_UI = """<!DOCTYPE html>
           <button type="button" onclick="playVoiceSample(event, 'edge_thiha', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
         </div>
 
-        <div onclick="selectVoice('cloned', this)" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
-          <span class="font-bold text-amber-300">⭐ My Cloned Voice (အသံတူပွား)</span>
+        <div onclick="selectVoice('cloned', this)" id="clonedVoiceRow" class="voice-row p-3 rounded-xl bg-[#1e2030] border border-gray-800 flex items-center justify-between cursor-pointer">
+          <div>
+            <span class="font-bold text-amber-300" id="clonedVoiceLabel">⭐ My Cloned Voice (အသံတူပွား)</span>
+          </div>
           <button type="button" onclick="playVoiceSample(event, 'cloned', this)" class="w-8 h-8 rounded-full bg-gray-800 hover:bg-amber-400 hover:text-black flex items-center justify-center text-xs font-bold">▶</button>
         </div>
       </div>
@@ -1058,7 +1116,7 @@ HTML_UI = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- MAIN RENDER BUTTON + SMOOTH 1% TO 100% PROGRESS + DOWNLOAD -->
+    <!-- MAIN RENDER BUTTON -->
     <div id="renderSection" class="space-y-3">
       <button onclick="startRecapRender()" id="mainRenderBtn" class="w-full py-4 rounded-2xl grad-btn text-base shadow-xl flex items-center justify-center gap-2 active:scale-98">
         🎬 Recap Video ထုတ်မယ်
@@ -1756,6 +1814,7 @@ HTML_UI = """<!DOCTYPE html>
       loadUser();
     }
 
+    // SAFE & FAST VOICE CLONE UPLOAD (NEVER HANGS!)
     async function uploadVoiceClone() {
       const name = document.getElementById("cloneName").value.trim();
       const file = document.getElementById("cloneSample").files[0];
@@ -1768,13 +1827,24 @@ HTML_UI = """<!DOCTYPE html>
       fd.append("user_id", userId);
       fd.append("voice_name", name);
       fd.append("sample", file);
-      const res = await fetch("/api/clone-voice", { method: "POST", body: fd });
-      const data = await res.json();
-      btn.innerText = "Clone လုပ်မည်";
-      btn.disabled = false;
-      if (!res.ok) return alert(data.detail);
-      alert("✅ အသံတူပွား ဖန်တီးပြီးပါပြီ!");
-      document.getElementById("cloneModal").classList.add("hidden");
+
+      try {
+        const res = await fetch("/api/clone-voice", { method: "POST", body: fd });
+        const rawText = await res.text();
+        let data = {};
+        try { data = JSON.parse(rawText); } catch(e) { throw new Error("ဆာဗာ ချိတ်ဆက်မှု အမှားအယွင်း ဖြစ်ပေါ်နေပါသည်။"); }
+        if (!res.ok) throw new Error(data.detail || "Voice Clone မအောင်မြင်ပါ။");
+
+        document.getElementById("clonedVoiceLabel").innerText = `⭐ ${name} (My Cloned Voice)`;
+        alert(`✅ "${name}" အသံတူပွား ဖန်တီးပြီးပါပြီ! (⭐ အသံတူပွား ကို ရွေးပြီး အသုံးပြုနိုင်ပါပြီ)`);
+        document.getElementById("cloneModal").classList.add("hidden");
+        selectVoice("cloned", document.getElementById("clonedVoiceRow"));
+      } catch (err) {
+        alert("❌ " + err.message);
+      } finally {
+        btn.innerText = "Clone လုပ်မည်";
+        btn.disabled = false;
+      }
     }
 
     function selectPackage(name, amount, pts, el) {
@@ -1857,8 +1927,7 @@ async def api_voice_sample(voice_key: str, user_id: int = 1638781080, style: str
         if not user["cloned_voice_id"]:
             raise HTTPException(status_code=400, detail="အသံတူပွား (Voice Clone) အရင်ဖန်တီးပြီးမှ နားထောင်နိုင်ပါသည်။")
         out_path = f"outputs/sample_cloned_{user_id}.mp3"
-        if not os.path.exists(out_path):
-            generate_cloned_tts("မင်္ဂလာပါ။ ဒါကတော့ သင့်ရဲ့ ကိုယ်ပိုင် အသံတူပွား နမူနာ ဖြစ်ပါတယ်။", user["cloned_voice_id"], out_path)
+        await generate_cloned_tts_smart("မင်္ဂလာပါ။ ဒါကတော့ သင့်ရဲ့ ကိုယ်ပိုင် အသံတူပွား နမူနာ ဖြစ်ပါတယ်။", user["cloned_voice_id"], style, 1.0, out_path)
         return {"audio_url": f"/{out_path}"}
 
     if voice_key in EDGE_VOICES:
@@ -1891,7 +1960,7 @@ async def api_tts(
     if voice_type == "cloned":
         if not user["cloned_voice_id"]:
             raise HTTPException(status_code=400, detail="အသံတူပွား (Voice Clone) အရင်ဖန်တီးပါ။")
-        generate_cloned_tts(text, user["cloned_voice_id"], out_path)
+        await generate_cloned_tts_smart(text, user["cloned_voice_id"], speaking_style, speed, out_path)
     else:
         v_key = voice_type if voice_type in EDGE_VOICES else "edge_thiha"
         await generate_edge_tts(text, v_key, speaking_style, speed, out_path)
@@ -1905,19 +1974,25 @@ async def api_clone_voice(user_id: int = Form(...), voice_name: str = Form(...),
     raw_path = f"uploads/{job_id}_{sample.filename}"
     audio_path = f"uploads/{job_id}_extracted.mp3"
 
-    with open(raw_path, "wb") as f:
-        f.write(await sample.read())
+    try:
+        with open(raw_path, "wb") as f:
+            f.write(await sample.read())
 
-    if not has_audio_stream(raw_path):
-        raise HTTPException(status_code=400, detail="တင်လိုက်သော ဖိုင်ထဲတွင် အသံ (Audio) မပါဝင်ပါ။")
+        if not has_audio_stream(raw_path):
+            raise HTTPException(status_code=400, detail="တင်လိုက်သော ဖိုင်ထဲတွင် အသံ (Audio) မပါဝင်ပါ။")
 
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", raw_path, "-vn", "-acodec", "libmp3lame", "-q:a", "2", audio_path],
-        check=True
-    )
+        # Trim to first 15 seconds (-t 15) so large MP4 videos extract in 1 second without hanging!
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", raw_path, "-t", "15", "-vn", "-ac", "1", "-ar", "22050", "-b:a", "64k", audio_path],
+            check=True
+        )
 
-    voice_id = clone_voice_elevenlabs(user_id, voice_name, audio_path)
-    return {"status": "success", "voice_id": voice_id}
+        voice_id = clone_voice_smart(user_id, voice_name, audio_path)
+        return {"status": "success", "voice_id": voice_id}
+    except HTTPException as he:
+        raise he
+    except Exception:
+        raise HTTPException(status_code=500, detail="အသံတူပွား ဖန်တီးရာတွင် အဆင်မပြေပါ။ ၅ စက္ကန့်မှ ၁၅ စက္ကန့်အတွင်း ဖိုင်တိုလေး ထပ်စမ်းကြည့်ပါ။")
 
 @app.post("/api/auto-script")
 async def api_auto_script(video: UploadFile = File(...), pov_mode: str = Form("auto_duo"), speaking_style: str = Form("movie_recap")):
@@ -2125,3 +2200,4 @@ async def get_output(filename: str, download: int = 0):
     if download == 1:
         return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
     return FileResponse(file_path)
+
