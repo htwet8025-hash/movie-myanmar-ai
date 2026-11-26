@@ -64,7 +64,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- RENDER JOB PROGRESS TRACKER (1% -> 100%) ---
 RENDER_JOBS = {}
 
 # --- DATABASE SETUP ---
@@ -171,54 +170,97 @@ def parse_time_to_sec(t_str: str) -> float:
     except Exception:
         return 0.0
 
-# --- RENDER CRISP BURMESE SUBTITLE PNG IMAGE USING PILLOW ---
-def render_burmese_subtitle_png(text: str, vid_w: int, vid_h: int, sub_size: int, sub_color: str, out_png: str):
+def split_burmese_short_chunks(text: str, max_chars: int = 42):
+    # Clean Burmese punctuation that can render as boxes in some fonts and split into short 1-2 line chunks
+    cleaned = text.replace("။", " ").replace("၊", " ").replace("\n", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return []
+    words = cleaned.split(" ")
+    chunks = []
+    cur = ""
+    for w in words:
+        if len(cur) + len(w) + 1 <= max_chars:
+            cur = (cur + " " + w).strip()
+        else:
+            if cur:
+                chunks.append(cur)
+            # If a single Burmese phrase without spaces is longer than max_chars, slice safely
+            while len(w) > max_chars:
+                chunks.append(w[:max_chars])
+                w = w[max_chars:]
+            cur = w
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+# --- RENDER CRISP BURMESE SUBTITLE PNG IMAGE (SUPPORTS ALL 8 COLOR STYLES + POSITION) ---
+def render_burmese_subtitle_png(
+    text: str,
+    vid_w: int,
+    vid_h: int,
+    sub_size: int,
+    sub_color: str,
+    sub_y_percent: int,
+    line_gap_mult: float,
+    out_png: str
+):
     ensure_burmese_font()
     img = Image.new("RGBA", (vid_w, vid_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    font_px = max(22, int((vid_w / 360.0) * sub_size))
+    # Clean characters so no missing glyph boxes appear
+    text = text.replace("။", "").replace("၊", " ").strip()
+    if not text:
+        img.save(out_png, "PNG")
+        return
+
+    font_px = max(20, int((vid_w / 380.0) * sub_size))
     try:
         font = ImageFont.truetype(BURMESE_FONT_PATH, font_px)
     except Exception:
         font = ImageFont.load_default()
 
-    max_w = int(vid_w * 0.88)
+    max_w = int(vid_w * 0.84)
     lines = []
     cur = ""
     for ch in text:
         test = cur + ch
         bbox = draw.textbbox((0, 0), test, font=font)
         if (bbox[2] - bbox[0]) > max_w and cur:
-            lines.append(cur)
+            lines.append(cur.strip())
             cur = ch
         else:
             cur = test
-    if cur:
-        lines.append(cur)
+    if cur.strip():
+        lines.append(cur.strip())
+
+    # Limit to max 2 lines per subtitle frame so it NEVER covers the whole screen
+    lines = lines[:2]
 
     line_heights = []
     line_widths = []
     for ln in lines:
         bb = draw.textbbox((0, 0), ln, font=font)
         line_widths.append(bb[2] - bb[0])
-        line_heights.append((bb[3] - bb[1]) + int(font_px * 0.35))
+        line_heights.append((bb[3] - bb[1]) + int(font_px * 0.35 * line_gap_mult))
 
     total_h = sum(line_heights)
-    y_cursor = int(vid_h * 0.82) - (total_h // 2)
-    y_cursor = max(20, min(vid_h - total_h - 30, y_cursor))
+    y_cursor = int(vid_h * (sub_y_percent / 100.0)) - (total_h // 2)
+    y_cursor = max(24, min(vid_h - total_h - 24, y_cursor))
 
+    # All 8 Color Presets matching UI buttons
     color_map = {
-        "clean": ((255, 220, 60, 255), None),
-        "sunny": ((255, 240, 80, 255), None),
-        "calm": ((125, 211, 252, 255), None),
-        "soft_glow": ((52, 211, 153, 255), None),
-        "bold_pop": ((255, 255, 255, 255), (37, 99, 235, 220)),
-        "box": ((255, 220, 80, 255), (0, 0, 0, 200)),
-        "punch": ((255, 255, 255, 255), (220, 38, 38, 220)),
-        "candy": ((255, 255, 255, 255), (219, 39, 119, 220)),
+        "clean": ((255, 215, 40, 255), None, (0, 0, 0, 255)),
+        "bold_pop": ((255, 255, 255, 255), (37, 99, 235, 240), (15, 23, 42, 255)),
+        "soft_glow": ((52, 211, 153, 255), (6, 78, 59, 170), (0, 0, 0, 255)),
+        "box": ((255, 220, 70, 255), (0, 0, 0, 220), (0, 0, 0, 255)),
+        "punch": ((255, 255, 255, 255), (220, 38, 38, 240), (0, 0, 0, 255)),
+        "calm": ((125, 211, 252, 255), None, (0, 0, 0, 255)),
+        "sunny": ((253, 224, 71, 255), None, (0, 0, 0, 255)),
+        "candy": ((255, 255, 255, 255), (219, 39, 119, 240), (0, 0, 0, 255)),
     }
-    fill_rgba, bg_rgba = color_map.get(sub_color, ((255, 255, 255, 255), (0, 0, 0, 170)))
+    fill_rgba, bg_rgba, outline_rgba = color_map.get(sub_color, ((255, 215, 40, 255), None, (0, 0, 0, 255)))
 
     for i, ln in enumerate(lines):
         lw = line_widths[i]
@@ -226,17 +268,18 @@ def render_burmese_subtitle_png(text: str, vid_w: int, vid_h: int, sub_size: int
         x_pos = (vid_w - lw) // 2
 
         if bg_rgba:
-            pad_x, pad_y = 14, 6
+            pad_x = int(font_px * 0.55)
+            pad_y = int(font_px * 0.22)
             draw.rounded_rectangle(
-                [x_pos - pad_x, y_cursor - pad_y, x_pos + lw + pad_x, y_cursor + lh - 4],
-                radius=12, fill=bg_rgba
+                [x_pos - pad_x, y_cursor - pad_y, x_pos + lw + pad_x, y_cursor + lh - int(font_px * 0.15)],
+                radius=14, fill=bg_rgba
             )
 
         outline_w = max(2, font_px // 14)
         for ox in range(-outline_w, outline_w + 1):
             for oy in range(-outline_w, outline_w + 1):
                 if ox != 0 or oy != 0:
-                    draw.text((x_pos + ox, y_cursor + oy), ln, font=font, fill=(0, 0, 0, 255))
+                    draw.text((x_pos + ox, y_cursor + oy), ln, font=font, fill=outline_rgba)
 
         draw.text((x_pos, y_cursor), ln, font=font, fill=fill_rgba)
         y_cursor += lh
@@ -315,7 +358,7 @@ def generate_cloned_tts(text: str, voice_id: str, out_path: str):
     with open(out_path, "wb") as f:
         f.write(res.content)
 
-# --- FAST AUTO TRANSLATE ---
+# --- ACCURATE SEMANTIC BURMESE TRANSLATION (NO PHONETIC GIBBERISH!) ---
 def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, speaking_style: str) -> str:
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=400, detail="AI API Key မထည့်ရသေးပါ။")
@@ -323,10 +366,16 @@ def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, 
     with open(audio_path, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode("utf-8")
 
+    anti_gibberish_rule = (
+        "CRITICAL RULE: Understand the actual meaning of the spoken language (Chinese, English, Korean, Thai, etc.) "
+        "and translate its TRUE MEANING into natural, idiomatic spoken Burmese! "
+        "NEVER write phonetic transliterations of foreign words in Burmese letters! Every single Burmese sentence must make 100% logical sense in Burmese."
+    )
+
     if speaking_style == "movie_recap" and pov_mode != "auto_duo":
-        target_chars = max(60, int(duration_sec * 17)) if duration_sec > 0 else 300
+        target_chars = max(60, int(duration_sec * 16)) if duration_sec > 0 else 280
         prompt = (
-            f"Listen to this video audio (duration: {duration_sec:.1f} seconds). "
+            f"Listen to this video audio (duration: {duration_sec:.1f} seconds). {anti_gibberish_rule} "
             f"Write an exciting, fast-paced Burmese TikTok/YouTube Movie Recap narration script explaining the scene dramatically "
             f"(using engaging Burmese recap endings like '...ပါပြီ', '...ခဲ့ပါတယ်', and ending with a short question asking viewers to comment like '...သင်ဆိုရင် ဘာလုပ်မလဲ Comment မှာ ရေးခဲ့ပါ'). "
             f"Keep the length around {target_chars} Burmese characters so it fits the {duration_sec:.1f} second video cleanly. "
@@ -334,22 +383,22 @@ def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, 
         )
     else:
         pov_instruction = {
-            "auto_duo": "Identify Male [M] and Female [F] speakers accurately for natural back-and-forth Burmese conversation dubbing.",
-            "direct": "Translate ONLY when characters actually speak. Keep exact dialogue POV in natural conversational Burmese.",
-            "third": "Narrate ONLY during speech segments in natural Third-Person Burmese style.",
-            "first": "Dub ONLY during speech segments in natural First-Person conversational Burmese style."
-        }.get(pov_mode, "Translate ONLY when characters speak into natural conversational Burmese.")
+            "auto_duo": "Translate the exact meaning of each character's dialogue into natural conversational Burmese, tagging [M] for Male speaker and [F] for Female speaker.",
+            "direct": "Translate the exact meaning of what each character says into natural conversational Burmese without changing POV.",
+            "third": "Narrate what is happening during speech segments in natural Third-Person Burmese style.",
+            "first": "Translate/dub the dialogue in natural First-Person conversational Burmese style."
+        }.get(pov_mode, "Translate the exact meaning of each character's dialogue into natural conversational Burmese.")
 
         prompt = (
-            f"Listen carefully to this audio (total duration: {duration_sec:.1f} seconds). "
+            f"Listen carefully to this audio (total duration: {duration_sec:.1f} seconds). {anti_gibberish_rule} "
             f"Detect ONLY the exact time segments where people are actually speaking! Do NOT generate speech during silent pauses. "
             f"Identify speaker gender ([M] for Male, [F] for Female). "
             f"{pov_instruction} "
             f"Keep each Burmese line concise (~14 Burmese characters per second of that segment). "
             f"Format EVERY spoken segment strictly on its own line like this:\n"
             f"[00:02 - 00:06] [M] မင်း ဒီကို ဘာလာလုပ်တာလဲ။\n"
-            f"[00:08 - 00:12] [F] ကျွန်မ ရှင့်ကို လာရှာတာပါ။\n"
-            f"Output ONLY these timestamped lines in Burmese without any extra text."
+            f"[00:08 - 00:12] [F] ကျွန်မ ရှင့်ကို ကယ်ဖို့ လာတာပါ။\n"
+            f"Output ONLY these timestamped lines in meaningful Burmese without any extra text."
         )
 
     payload = {
@@ -375,7 +424,7 @@ def call_gemini_script_gen(audio_path: str, duration_sec: float, pov_mode: str, 
 
     raise HTTPException(status_code=500, detail="AI စာသားဘာသာပြန်ရာတွင် ခေတ္တချို့ယွင်းနေပါသည်။ ခဏနေမှ ထပ်မံကြိုးစားကြည့်ပါ။")
 
-# --- BUILD SYNCED DUBBING AUDIO + PNG SUBTITLE TIMELINE ---
+# --- BUILD SYNCED DUBBING AUDIO + SHORT CHUNKED PNG SUBTITLES ---
 async def build_synced_dub_and_png_subs(
     script_text: str,
     vid_w: int,
@@ -388,6 +437,8 @@ async def build_synced_dub_and_png_subs(
     sub_enabled: bool,
     sub_size: int,
     sub_color: str,
+    sub_y_percent: int,
+    line_gap_mult: float,
     user: dict,
     user_id: int,
     job_id: str,
@@ -441,15 +492,17 @@ async def build_synced_dub_and_png_subs(
 
         RENDER_JOBS[job_id] = {"pct": 45, "msg": "⏳ မြန်မာစာတန်းထိုးများ ပြင်ဆင်နေပါသည် (45%)..."}
         if sub_enabled:
-            sentences = [s.strip() for s in re.split(r"[။\n]+", clean_txt) if s.strip()]
-            if not sentences:
-                sentences = [clean_txt]
-            chunk_dur = max(1.5, (vid_dur if vid_dur > 0 else len(sentences) * 3) / len(sentences))
-            for idx, sent in enumerate(sentences):
+            # Split into short 1-2 line chunks (~38 chars each) so subtitles never cover the screen!
+            short_chunks = split_burmese_short_chunks(clean_txt, max_chars=38)
+            if not short_chunks:
+                short_chunks = [clean_txt[:38]]
+            total_span = vid_dur if vid_dur > 0 else len(short_chunks) * 2.5
+            chunk_dur = max(1.0, total_span / len(short_chunks))
+            for idx, chunk in enumerate(short_chunks):
                 st = idx * chunk_dur
-                et = min(vid_dur if vid_dur > 0 else (idx + 1) * chunk_dur, (idx + 1) * chunk_dur)
+                et = min(total_span, (idx + 1) * chunk_dur)
                 png_path = f"outputs/sub_{job_id}_{idx}.png"
-                render_burmese_subtitle_png(sent, vid_w, vid_h, sub_size, sub_color, png_path)
+                render_burmese_subtitle_png(chunk, vid_w, vid_h, sub_size, sub_color, sub_y_percent, line_gap_mult, png_path)
                 png_overlays.append((st, et, png_path))
 
         return png_overlays
@@ -483,9 +536,16 @@ async def build_synced_dub_and_png_subs(
         clip_files.append((start_s, fit_clip))
 
         if sub_enabled:
-            png_path = f"outputs/sub_{job_id}_{idx}.png"
-            render_burmese_subtitle_png(txt, vid_w, vid_h, sub_size, sub_color, png_path)
-            png_overlays.append((start_s, end_s, png_path))
+            sub_chunks = split_burmese_short_chunks(txt, max_chars=38)
+            if not sub_chunks:
+                sub_chunks = [txt]
+            sub_step = (end_s - start_s) / len(sub_chunks)
+            for s_i, s_txt in enumerate(sub_chunks):
+                s_st = start_s + s_i * sub_step
+                s_et = start_s + (s_i + 1) * sub_step
+                png_path = f"outputs/sub_{job_id}_{idx}_{s_i}.png"
+                render_burmese_subtitle_png(s_txt, vid_w, vid_h, sub_size, sub_color, sub_y_percent, line_gap_mult, png_path)
+                png_overlays.append((s_st, s_et, png_path))
 
     update_points(user_id, -credit_cost)
 
@@ -702,7 +762,7 @@ HTML_UI = """<!DOCTYPE html>
               <div id="resizeHandle" class="absolute -bottom-2.5 -right-2.5 w-6 h-6 rounded-full bg-teal-400 border-2 border-gray-900 shadow-lg cursor-nwse-resize"></div>
             </div>
 
-            <div id="subPosPill" style="bottom: 10%;"
+            <div id="subPosPill" style="top: 82%;"
                  class="absolute left-1/2 -translate-x-1/2 bg-amber-400 text-gray-950 font-extrabold text-[11px] px-3 py-1 rounded-full shadow-lg cursor-ns-resize whitespace-nowrap touch-none">
               📝 စာတန်း — ဆွဲရွှေ့ပါ
             </div>
@@ -745,11 +805,11 @@ HTML_UI = """<!DOCTYPE html>
             ↕️ စာ ၂ ကြောင်းကြား အကွာ <span id="lineGapLabel" class="text-teal-400">ပုံမှန်</span>
           </div>
           <div class="grid grid-cols-5 gap-1.5 text-center">
-            <button onclick="setLineGap('ကျပ်', 1.1, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">ကျပ်<br><span class="text-[10px] text-gray-500">0.65x</span></button>
-            <button onclick="setLineGap('0.8x', 1.25, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">0.8x</button>
-            <button onclick="setLineGap('ပုံမှန်', 1.5, this)" class="gap-btn py-2 rounded-xl grad-pill text-[11px]">ပုံမှန်</button>
-            <button onclick="setLineGap('1.2x', 1.75, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">1.2x</button>
-            <button onclick="setLineGap('ကျယ်', 2.0, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">ကျယ်<br><span class="text-[10px] text-gray-500">1.4x</span></button>
+            <button onclick="setLineGap('ကျပ်', 0.75, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">ကျပ်<br><span class="text-[10px] text-gray-500">0.65x</span></button>
+            <button onclick="setLineGap('0.8x', 0.85, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">0.8x</button>
+            <button onclick="setLineGap('ပုံမှန်', 1.0, this)" class="gap-btn py-2 rounded-xl grad-pill text-[11px]">ပုံမှန်</button>
+            <button onclick="setLineGap('1.2x', 1.25, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">1.2x</button>
+            <button onclick="setLineGap('ကျယ်', 1.45, this)" class="gap-btn py-2 rounded-xl bg-[#1e2030] border border-gray-800 text-[11px] text-gray-300">ကျယ်<br><span class="text-[10px] text-gray-500">1.4x</span></button>
           </div>
         </div>
 
@@ -803,7 +863,7 @@ HTML_UI = """<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- Color Presets -->
+        <!-- Color Presets (ALL 8 WORKING IN VIDEO RENDER!) -->
         <div class="space-y-2">
           <div class="sub-card rounded-xl px-3 py-2 text-xs font-bold text-gray-200">🎨 စာတန်း အရောင်စတိုင်</div>
           <div class="grid grid-cols-2 gap-2 text-center text-xs">
@@ -1248,6 +1308,7 @@ HTML_UI = """<!DOCTYPE html>
       origAudioMode: "bgm_only",
       subEnabled: true,
       subSize: 17,
+      lineGapMult: 1.0,
       subColorPreset: "clean",
       ratio: "original",
       resolution: "original",
@@ -1500,7 +1561,7 @@ HTML_UI = """<!DOCTYPE html>
     }
     function setOrigAudioMode(mode, el) { state.origAudioMode = mode; activateGroup("orig-btn", el); }
     function setSubSize(code, label, px, el) { activateGroup("size-btn", el); state.subSize = px; document.getElementById("subSizeLabel").innerText = label; document.getElementById("liveSubSample").style.fontSize = px + "px"; }
-    function setLineGap(label, lh, el) { activateGroup("gap-btn", el); document.getElementById("lineGapLabel").innerText = label; document.getElementById("liveSubSample").style.lineHeight = lh; }
+    function setLineGap(label, mult, el) { activateGroup("gap-btn", el); state.lineGapMult = mult; document.getElementById("lineGapLabel").innerText = label; document.getElementById("liveSubSample").style.lineHeight = (1.5 * mult); }
     function setRatio(r, el) { state.ratio = r; activateGroup("ratio-btn", el); }
     function setRes(r, el) { state.resolution = r; activateGroup("res-btn", el); }
     function setSubEnabled(val, el) { state.subEnabled = val; activateGroup("suben-btn", el); subPill.style.display = val ? "block" : "none"; }
@@ -1540,7 +1601,6 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
-    // SMOOTH 1% TO 100% RENDER WITH REAL SERVER PROGRESS POLLING
     async function startRecapRender() {
       const file = document.getElementById("videoInput").files[0];
       const script = document.getElementById("recapScript").value.trim();
@@ -1565,7 +1625,6 @@ HTML_UI = """<!DOCTYPE html>
       pctLabel.innerText = "1%";
       statusMsg.innerText = "⏳ Video ဖိုင်ကို ပေးပို့ပြင်ဆင်နေပါသည် (1%)...";
 
-      // Smoothly advance percentage while polling real backend stage
       const pollTimer = setInterval(async () => {
         try {
           const pr = await fetch(`/api/job-progress/${clientJobId}`);
@@ -1595,6 +1654,7 @@ HTML_UI = """<!DOCTYPE html>
       const boxY = Math.round((maskBox.offsetTop / ch) * 100);
       const boxW = Math.round((maskBox.offsetWidth / cw) * 100);
       const boxH = Math.round((maskBox.offsetHeight / ch) * 100);
+      const subY = Math.round((subPill.offsetTop / ch) * 100) || 82;
 
       const fd = new FormData();
       fd.append("job_id", clientJobId);
@@ -1609,7 +1669,9 @@ HTML_UI = """<!DOCTYPE html>
       fd.append("orig_audio_mode", state.origAudioMode);
       fd.append("sub_enabled", state.subEnabled ? "1" : "0");
       fd.append("sub_size", state.subSize);
+      fd.append("line_gap_mult", state.lineGapMult);
       fd.append("sub_color", state.subColorPreset);
+      fd.append("sub_y", subY);
       fd.append("box_x", boxX);
       fd.append("box_y", boxY);
       fd.append("box_w", boxW);
@@ -1899,7 +1961,9 @@ async def api_render_recap(
     orig_audio_mode: str = Form("bgm_only"),
     sub_enabled: str = Form("1"),
     sub_size: int = Form(17),
+    line_gap_mult: float = Form(1.0),
     sub_color: str = Form("clean"),
+    sub_y: int = Form(82),
     box_x: int = Form(10),
     box_y: int = Form(62),
     box_w: int = Form(80),
@@ -1938,7 +2002,7 @@ async def api_render_recap(
 
         png_overlays = await build_synced_dub_and_png_subs(
             script_text, out_w, out_h, vid_dur, pov_mode, voice_type, speaking_style, speed,
-            sub_enabled == "1", sub_size, sub_color, user, user_id, job_id, synced_tts
+            sub_enabled == "1", sub_size, sub_color, sub_y, line_gap_mult, user, user_id, job_id, synced_tts
         )
 
         RENDER_JOBS[job_id] = {"pct": 68, "msg": "⏳ Video နှင့် မြန်မာစာတန်းထိုးများ ပေါင်းစပ်နေပါသည် (68%)..."}
